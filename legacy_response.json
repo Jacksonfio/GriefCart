@@ -1,0 +1,1 @@
+{"statusCode": 404, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}, "body": "{\"error\": \"Legacy answers not found\"}"}

@@ -1,0 +1,1568 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "GriefCart \u2014 AI Financial Continuity & Asset Recovery Platform"
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  AppUrl:
+    Type: String
+    Default: https://griefcart.app
+  SesSourceEmail:
+    Type: String
+    Default: noreply@griefcart.app
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-5-sonnet-20240620-v1:0
+  KmsKeyAlias:
+    Type: String
+    Default: griefcart-primary
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+    - arm64
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        USERS_TABLE:
+          Ref: UsersTable
+        DOCUMENTS_TABLE:
+          Ref: DocumentsTable
+        TRUSTED_PERSONS_TABLE:
+          Ref: TrustedPersonsTable
+        CONTINUITY_PLANS_TABLE:
+          Ref: ContinuityPlansTable
+        FINANCIAL_TWIN_TABLE:
+          Ref: FinancialTwinTable
+        GRAPH_SYNC_QUEUE:
+          Ref: GraphSyncQueue
+        DOCUMENT_BUCKET:
+          Ref: DocumentBucket
+        SNS_TOPIC_ARN:
+          Ref: NotificationTopic
+        KMS_KEY_ID:
+          Ref: KmsKey
+        APP_URL:
+          Ref: AppUrl
+        SES_SOURCE_EMAIL:
+          Ref: SesSourceEmail
+        BEDROCK_MODEL_ID:
+          Ref: BedrockModelId
+        LEGACY_TABLE:
+          Ref: LegacyLettersTable
+Resources:
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: GriefCart primary encryption key
+      EnableKeyRotation: true
+      RotationPeriodInDays: 90
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:aws:iam::${AWS::AccountId}:root
+          Action: kms:*
+          Resource: '*'
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource: '*'
+        - Effect: Allow
+          Principal:
+            Service: s3.amazonaws.com
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource: '*'
+    Metadata:
+      SamResourceId: KmsKey
+  KmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName:
+        Fn::Sub: alias/${KmsKeyAlias}
+      TargetKeyId:
+        Ref: KmsKey
+    Metadata:
+      SamResourceId: KmsAlias
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: griefcart-${Environment}-documents
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: aws:kms
+            KMSMasterKeyID:
+              Ref: KmsKey
+          BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+        - Id: NoncurrentVersionRetention
+          Status: Enabled
+          NoncurrentVersionExpirationInDays: 90
+      LoggingConfiguration:
+        DestinationBucketName:
+          Ref: AuditLogBucket
+        LogFilePrefix: s3-access/
+    Metadata:
+      SamResourceId: DocumentBucket
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: DocumentBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Deny
+          Principal: '*'
+          Action: s3:*
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+          - Fn::Sub: arn:aws:s3:::${DocumentBucket}
+          Condition:
+            Bool:
+              aws:SecureTransport: 'false'
+    Metadata:
+      SamResourceId: DocumentBucketPolicy
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-users
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: userId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: userId
+        AttributeType: S
+      - AttributeName: email
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: email-index
+        KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Ref: KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: UsersTable
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-documents
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: documentId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: documentId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      - AttributeName: category
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: userId-index
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      - IndexName: category-index
+        KeySchema:
+        - AttributeName: category
+          KeyType: HASH
+        Projection:
+          ProjectionType: KEYS_ONLY
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Ref: KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: DocumentsTable
+  TrustedPersonsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-trusted-persons
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: personId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: personId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: userId-index
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Ref: KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: TrustedPersonsTable
+  ContinuityPlansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-continuity-plans
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: planId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: planId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: userId-index
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: ContinuityPlansTable
+  FinancialTwinTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-financial-twin
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: twinId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: twinId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: userId-index
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+    Metadata:
+      SamResourceId: FinancialTwinTable
+  LegacyLettersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: griefcart-${Environment}-legacy-letters
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+      - AttributeName: legacyId
+        KeyType: HASH
+      AttributeDefinitions:
+      - AttributeName: legacyId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      GlobalSecondaryIndexes:
+      - IndexName: userId-index
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Ref: KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: LegacyLettersTable
+  GraphSyncQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: griefcart-${Environment}-graph-sync
+      KmsMasterKeyId:
+        Ref: KmsKey
+      VisibilityTimeout: 120
+    Metadata:
+      SamResourceId: GraphSyncQueue
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: griefcart-${Environment}-alerts
+      KmsMasterKeyId:
+        Ref: KmsKey
+    Metadata:
+      SamResourceId: NotificationTopic
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName:
+        Fn::Sub: griefcart-${Environment}-pool
+      AutoVerifiedAttributes:
+      - email
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+      - SOFTWARE_TOKEN_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+        - Name: verified_email
+          Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      LambdaConfig:
+        PostConfirmation:
+          Fn::GetAtt:
+          - CognitoTriggersFunction
+          - Arn
+        PostAuthentication:
+          Fn::GetAtt:
+          - CognitoTriggersFunction
+          - Arn
+        PreAuthentication:
+          Fn::GetAtt:
+          - CognitoTriggersFunction
+          - Arn
+    Metadata:
+      SamResourceId: CognitoUserPool
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName:
+        Fn::Sub: griefcart-${Environment}-client
+      UserPoolId:
+        Ref: CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+      - ALLOW_USER_SRP_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+      - ALLOW_CUSTOM_AUTH
+    Metadata:
+      SamResourceId: CognitoUserPoolClient
+  CognitoPermTriggers:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: CognitoTriggersFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - CognitoUserPool
+        - Arn
+    Metadata:
+      SamResourceId: CognitoPermTriggers
+  DocumentEncryptionContext:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        Fn::Sub: griefcart/${Environment}/encryption-context
+      Description: Encryption context for document encryption
+      SecretString:
+        Fn::Sub: '{"app":"griefcart","environment":"${Environment}"}'
+    Metadata:
+      SamResourceId: DocumentEncryptionContext
+  ContinuityScanSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: griefcart-${Environment}-continuity-scan
+      ScheduleExpression: rate(7 days)
+      State: ENABLED
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - FinancialDetectiveFunction
+          - Arn
+        Id: FinancialDetectiveTarget
+    Metadata:
+      SamResourceId: ContinuityScanSchedule
+  DetectivePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: FinancialDetectiveFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - ContinuityScanSchedule
+        - Arn
+    Metadata:
+      SamResourceId: DetectivePermission
+  EmergencyWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName:
+        Fn::Sub: griefcart-${Environment}-emergency
+      DefinitionString:
+        Fn::Sub:
+        - "{\n  \"Comment\": \"Emergency Continuity Workflow\",\n  \"StartAt\": \"\
+          Verify Identity\",\n  \"States\": {\n    \"Verify Identity\": {\n      \"\
+          Type\": \"Task\",\n      \"Resource\": \"${verifyFunction}\",\n      \"\
+          Next\": \"Check Continuity Plan\"\n    },\n    \"Check Continuity Plan\"\
+          : {\n      \"Type\": \"Task\",\n      \"Resource\": \"${planFunction}\"\
+          ,\n      \"Next\": \"Determine Access Level\"\n    },\n    \"Determine Access\
+          \ Level\": {\n      \"Type\": \"Choice\",\n      \"Choices\": [\n      \
+          \  {\"Variable\": \"$.accessLevel\", \"StringEquals\": \"full\", \"Next\"\
+          : \"FullAccess\"},\n        {\"Variable\": \"$.accessLevel\", \"StringEquals\"\
+          : \"limited\", \"Next\": \"LimitedAccess\"},\n        {\"Variable\": \"\
+          $.accessLevel\", \"StringEquals\": \"emergency\", \"Next\": \"EmergencyRelease\"\
+          }\n      ],\n      \"Default\": \"EmergencyRelease\"\n    },\n    \"FullAccess\"\
+          : {\n      \"Type\": \"Task\",\n      \"Resource\": \"${releaseFunction}\"\
+          ,\n      \"Next\": \"GenerateRecoveryGuide\"\n    },\n    \"LimitedAccess\"\
+          : {\n      \"Type\": \"Task\",\n      \"Resource\": \"${releaseFunction}\"\
+          ,\n      \"Next\": \"GenerateRecoveryGuide\"\n    },\n    \"EmergencyRelease\"\
+          : {\n      \"Type\": \"Task\",\n      \"Resource\": \"${releaseFunction}\"\
+          ,\n      \"Next\": \"GenerateRecoveryGuide\"\n    },\n    \"GenerateRecoveryGuide\"\
+          : {\n      \"Type\": \"Task\",\n      \"Resource\": \"${recoveryFunction}\"\
+          ,\n      \"End\": true\n    }\n  }\n}"
+        - verifyFunction:
+            Fn::GetAtt:
+            - EmergencyWorkflowFunction
+            - Arn
+          planFunction:
+            Fn::GetAtt:
+            - ContinuityPlanFunction
+            - Arn
+          releaseFunction:
+            Fn::GetAtt:
+            - DocumentVaultFunction
+            - Arn
+          recoveryFunction:
+            Fn::GetAtt:
+            - RecoveryAssistantFunction
+            - Arn
+      RoleArn:
+        Fn::GetAtt:
+        - StepFunctionsRole
+        - Arn
+    Metadata:
+      SamResourceId: EmergencyWorkflow
+  AuditLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: griefcart-${Environment}-audit
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: aws:kms
+            KMSMasterKeyID:
+              Ref: KmsKey
+    Metadata:
+      SamResourceId: AuditLogBucket
+  AuditLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: AuditLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AWSCloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AuditLogBucket}
+        - Sid: AWSCloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AuditLogBucket}/*
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+        - Sid: S3ServerAccessLogsWrite
+          Effect: Allow
+          Principal:
+            Service: logging.s3.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AuditLogBucket}/*
+    Metadata:
+      SamResourceId: AuditLogBucketPolicy
+  CloudTrailTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName:
+        Fn::Sub: griefcart-${Environment}-trail
+      S3BucketName:
+        Ref: AuditLogBucket
+      IsLogging: true
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EventSelectors:
+      - ReadWriteType: All
+        IncludeManagementEvents: true
+        DataResources:
+        - Type: AWS::S3::Object
+          Values:
+          - Fn::Sub: arn:aws:s3:::${DocumentBucket}/
+    Metadata:
+      SamResourceId: CloudTrailTrail
+  CognitoTriggersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-cognito-triggers
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/565f73fa678b971f8e6b6cbcc60b9d65
+      Handler: index.lambda_handler
+      Timeout: 10
+      Policies:
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: CognitoTriggersFunction
+  DocumentVaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-document-vault
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/ca4a270c9478815e67b4f18ea67ede25
+      Handler: index.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: DocumentsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:DeleteObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetSecretValue
+          Resource:
+            Ref: DocumentEncryptionContext
+      Environment:
+        Variables:
+          KMS_KEY_ID:
+            Ref: KmsKey
+          DOCUMENT_BUCKET:
+            Ref: DocumentBucket
+          ENCRYPTION_CONTEXT_SECRET:
+            Ref: DocumentEncryptionContext
+    Metadata:
+      SamResourceId: DocumentVaultFunction
+  FinancialTwinFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-financial-twin
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/3b21596280f5770160bd279e6d94ea5d
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 1024
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: FinancialTwinTable
+      - SQSSendMessagePolicy:
+          QueueName:
+            Fn::GetAtt:
+            - GraphSyncQueue
+            - QueueName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: FinancialTwinFunction
+  FinancialDetectiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-financial-detective
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/89eaab7700673017ebf94bd6c623a9d1
+      Handler: index.lambda_handler
+      Timeout: 300
+      MemorySize: 1024
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: FinancialTwinTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: UsersTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+        - Effect: Allow
+          Action:
+          - comprehend:DetectEntities
+          Resource: '*'
+    Metadata:
+      SamResourceId: FinancialDetectiveFunction
+  ContinuityScorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-continuity-scorer
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/54b6465f96f0ba4249b156ae275e7fbb
+      Handler: index.lambda_handler
+      Timeout: 60
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+    Metadata:
+      SamResourceId: ContinuityScorerFunction
+  TrustedPersonsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-trusted-persons
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/390b51f4891be1f47ec839059051d20b
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: UsersTable
+      - SNSPublishMessagePolicy:
+          TopicName:
+            Fn::GetAtt:
+            - NotificationTopic
+            - TopicName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - ses:SendEmail
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+      - Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetSecretValue
+          - secretsmanager:PutSecretValue
+          - secretsmanager:UpdateSecret
+          Resource:
+            Ref: DocumentEncryptionContext
+    Metadata:
+      SamResourceId: TrustedPersonsFunction
+  EmergencyWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-emergency-workflow
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/bfdddc45fb90b50ba631d50148d770c8
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - states:StartExecution
+          Resource:
+            Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:griefcart-${Environment}-emergency
+    Metadata:
+      SamResourceId: EmergencyWorkflowFunction
+  ContinuityPlanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-continuity-plan
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/0663cdccdea4192a39222d783ba699fe
+      Handler: index.lambda_handler
+      Timeout: 60
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+    Metadata:
+      SamResourceId: ContinuityPlanFunction
+  AIChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-ai-chat
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/1485d760dbab0b88e15d7fdbb4f1048d
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: FinancialTwinTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: AIChatFunction
+  RecoveryAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-recovery-assistant
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/458b26dcb42863ce5ff50cf034efd665
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: RecoveryAssistantFunction
+  LegacyLettersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-legacy-letters
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/3dff5e2745ad61d9092292501db5b268
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: LegacyLettersTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: LegacyLettersTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: LegacyLettersFunction
+  AuditTrailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-audit-trail
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/8d2584ebc09be7a9ff33f27acbb8f410
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - cloudtrail:LookupEvents
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AuditLogBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+    Metadata:
+      SamResourceId: AuditTrailFunction
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name:
+        Fn::Sub: griefcart-${Environment}-api
+      StageName: v1
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn:
+              Fn::GetAtt:
+              - CognitoUserPool
+              - Arn
+            Identity:
+              Header: Authorization
+              ValidationExpression: ^Bearer\s.*
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowOrigin: '''*'''
+        AllowHeaders: '''Content-Type,Authorization'''
+        AllowMethods: '''GET,POST,PUT,DELETE,OPTIONS'''
+      MethodSettings:
+      - ResourcePath: /*
+        HttpMethod: '*'
+        LoggingLevel: 'OFF'
+        DataTraceEnabled: false
+        ThrottlingRateLimit: 1000
+    Metadata:
+      SamResourceId: ApiGateway
+  DocumentsApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-documents-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/ca4a270c9478815e67b4f18ea67ede25
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: DocumentsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:DeleteObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+      Events:
+        Upload:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /documents/upload
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        List:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /documents
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Get:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /documents/{id}
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /documents/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: DocumentsApi
+  FinancialTwinApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-twin-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/3b21596280f5770160bd279e6d94ea5d
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: FinancialTwinTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+      Events:
+        GetTwin:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /twin
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        QueryTwin:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /twin/query
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        RefreshTwin:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /twin/refresh
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: FinancialTwinApi
+  DetectiveApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-detective-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/89eaab7700673017ebf94bd6c623a9d1
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          - comprehend:DetectEntities
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+      Events:
+        Scan:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /detective/scan
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        FindMissing:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /detective/missing
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Subscriptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /detective/subscriptions
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: DetectiveApi
+  ContinuityScoreApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-score-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/54b6465f96f0ba4249b156ae275e7fbb
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+      Events:
+        GetScore:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /continuity-score
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: ContinuityScoreApi
+  TrustedPersonsApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-trusted-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/390b51f4891be1f47ec839059051d20b
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - SNSPublishMessagePolicy:
+          TopicName:
+            Fn::GetAtt:
+            - NotificationTopic
+            - TopicName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - ses:SendEmail
+          Resource: '*'
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /trusted-persons
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Add:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /trusted-persons
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Update:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /trusted-persons/{id}
+            Method: PUT
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /trusted-persons/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: TrustedPersonsApi
+  ContinuityPlanApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-plan-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/0663cdccdea4192a39222d783ba699fe
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: ContinuityPlansTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+      Events:
+        GetPlan:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /continuity-plan
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GeneratePlan:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /continuity-plan/generate
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: ContinuityPlanApi
+  AIChatApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-chat-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/1485d760dbab0b88e15d7fdbb4f1048d
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: FinancialTwinTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+      Events:
+        SendMessage:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /chat
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: AIChatApi
+  RecoveryAssistantApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-recovery-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/458b26dcb42863ce5ff50cf034efd665
+      Handler: index.lambda_handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: UsersTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: DocumentsTable
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TrustedPersonsTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+      Events:
+        Recovery:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /recovery
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: RecoveryAssistantApi
+  LegacyLettersApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-legacy-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/3dff5e2745ad61d9092292501db5b268
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: LegacyLettersTable
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: LegacyLettersTable
+      - Statement:
+        - Effect: Allow
+          Action:
+          - bedrock:InvokeModel
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${DocumentBucket}/*
+        - Effect: Allow
+          Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey
+          Resource:
+            Fn::GetAtt:
+            - KmsKey
+            - Arn
+      Events:
+        SaveAnswers:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /legacy
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetAnswers:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /legacy
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GenerateLegacy:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /legacy/generate
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: LegacyLettersApi
+  AuditApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: griefcart-${Environment}-audit-api
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-bmzmctxibjss/8d2584ebc09be7a9ff33f27acbb8f410
+      Handler: index.lambda_handler
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - cloudtrail:LookupEvents
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AuditLogBucket}/*
+      Events:
+        GetAuditLog:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGateway
+            Path: /audit
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: AuditApi
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: griefcart-${Environment}-step-functions
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: StepFunctionsPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            - kms:Decrypt
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+    Metadata:
+      SamResourceId: StepFunctionsRole
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint
+    Value:
+      Fn::Sub: https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value:
+      Ref: CognitoUserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value:
+      Ref: CognitoUserPoolClient
+  DocumentBucketName:
+    Description: S3 Document Vault
+    Value:
+      Ref: DocumentBucket
+  KmsKeyId:
+    Description: KMS Key ID
+    Value:
+      Ref: KmsKey

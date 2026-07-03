@@ -1,0 +1,1533 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "GriefCart — AI Financial Continuity & Asset Recovery Platform"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  AppUrl:
+    Type: String
+    Default: "http://localhost:5173"
+    Description: OAuth callback/logout URL (frontend origin)
+  SesSourceEmail:
+    Type: String
+    Default: "jacksonjp646@gmail.com"
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: Google Gemini API key for AI features
+  GeminiApiKeySecretArn:
+    Type: String
+    Default: "arn:aws:secretsmanager:us-east-1:632672560279:secret:griefcart/dev/gemini-api-key-v2-Zpjk1p"
+    Description: ARN of the existing Gemini API key secret
+  KmsKeyAlias:
+    Type: String
+    Default: "griefcart-primary"
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        DOCUMENTS_TABLE: !Ref DocumentsTable
+        TRUSTED_PERSONS_TABLE: !Ref TrustedPersonsTable
+        CONTINUITY_PLANS_TABLE: !Ref ContinuityPlansTable
+        FINANCIAL_TWIN_TABLE: !Ref FinancialTwinTable
+        GRAPH_SYNC_QUEUE: !Ref GraphSyncQueue
+        DOCUMENT_BUCKET: !Ref DocumentBucket
+        SNS_TOPIC_ARN: !Ref NotificationTopic
+        KMS_KEY_ID: !Ref KmsKey
+        APP_URL: !Ref AppUrl
+        SES_SOURCE_EMAIL: !Ref SesSourceEmail
+        LEGACY_TABLE: !Ref LegacyLettersTable
+        GEMINI_API_KEY_SECRET: !Ref GeminiApiKeySecretArn
+
+Resources:
+  # ─── KMS ───────────────────────────────────────────────────────
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "GriefCart primary encryption key"
+      EnableKeyRotation: true
+      RotationPeriodInDays: 90
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
+
+  KmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${KmsKeyAlias}"
+      TargetKeyId: !Ref KmsKey
+
+  # ─── S3 Document Vault ────────────────────────────────────────
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "griefcart-${Environment}-documents"
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKey
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: NoncurrentVersionRetention
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AuditLogBucket
+        LogFilePrefix: s3-access/
+
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+              - !Sub "arn:aws:s3:::${DocumentBucket}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # ─── DynamoDB ─────────────────────────────────────────────────
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-users"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-documents"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: category-index
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  TrustedPersonsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-trusted-persons"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: personId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: personId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ContinuityPlansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-continuity-plans"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: planId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: planId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  FinancialTwinTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-financial-twin"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: twinId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: twinId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  LegacyLettersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "griefcart-${Environment}-legacy-letters"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: legacyId
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: legacyId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: userId-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─── SQS ─────────────────────────────────────────────────────
+  GraphSyncQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "griefcart-${Environment}-graph-sync"
+      KmsMasterKeyId: !Ref KmsKey
+      VisibilityTimeout: 120
+
+  # ─── SNS ─────────────────────────────────────────────────────
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "griefcart-${Environment}-alerts"
+      KmsMasterKeyId: !Ref KmsKey
+
+  # ─── Cognito ─────────────────────────────────────────────────
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "griefcart-${Environment}-pool"
+      AutoVerifiedAttributes: [email]
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      LambdaConfig:
+        PostConfirmation: !GetAtt CognitoTriggersFunction.Arn
+        PostAuthentication: !GetAtt CognitoTriggersFunction.Arn
+        PreAuthentication: !GetAtt CognitoTriggersFunction.Arn
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "griefcart-${Environment}-client"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_CUSTOM_AUTH
+      AllowedOAuthFlows:
+        - implicit
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Ref AppUrl
+        - "https://d1yywp83atcbrx.cloudfront.net"
+        - "https://jacksonfio-griefcart-financial-continuity.hf.space"
+      LogoutURLs:
+        - !Ref AppUrl
+        - "https://d1yywp83atcbrx.cloudfront.net"
+        - "https://jacksonfio-griefcart-financial-continuity.hf.space"
+      SupportedIdentityProviders:
+        - COGNITO
+
+  CognitoPermTriggers:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CognitoTriggersFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+  # ─── Secrets Manager ─────────────────────────────────────────
+  # GeminiApiKeySecret removed - using existing secret managed outside CloudFormation
+  # The working secret ARN must be provided via the GeminiApiKeySecretArn parameter
+
+  DocumentEncryptionContext:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "griefcart/${Environment}/encryption-context"
+      Description: "Encryption context for document encryption"
+      SecretString: !Sub '{"app":"griefcart","environment":"${Environment}"}'
+
+  # ─── EventBridge ─────────────────────────────────────────────
+  ContinuityScanSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "griefcart-${Environment}-continuity-scan"
+      ScheduleExpression: rate(7 days)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FinancialDetectiveFunction.Arn
+          Id: FinancialDetectiveTarget
+
+  DetectivePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FinancialDetectiveFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ContinuityScanSchedule.Arn
+
+  # ─── Step Functions ──────────────────────────────────────────
+  EmergencyWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "griefcart-${Environment}-emergency"
+      DefinitionString: !Sub
+        - |-
+          {
+            "Comment": "Emergency Continuity Workflow",
+            "StartAt": "Verify Identity",
+            "States": {
+              "Verify Identity": {
+                "Type": "Task",
+                "Resource": "${verifyFunction}",
+                "Next": "Check Continuity Plan"
+              },
+              "Check Continuity Plan": {
+                "Type": "Task",
+                "Resource": "${planFunction}",
+                "Next": "Determine Access Level"
+              },
+              "Determine Access Level": {
+                "Type": "Choice",
+                "Choices": [
+                  {"Variable": "$.accessLevel", "StringEquals": "full", "Next": "FullAccess"},
+                  {"Variable": "$.accessLevel", "StringEquals": "limited", "Next": "LimitedAccess"},
+                  {"Variable": "$.accessLevel", "StringEquals": "emergency", "Next": "EmergencyRelease"}
+                ],
+                "Default": "EmergencyRelease"
+              },
+              "FullAccess": {
+                "Type": "Task",
+                "Resource": "${releaseFunction}",
+                "Next": "GenerateRecoveryGuide"
+              },
+              "LimitedAccess": {
+                "Type": "Task",
+                "Resource": "${releaseFunction}",
+                "Next": "GenerateRecoveryGuide"
+              },
+              "EmergencyRelease": {
+                "Type": "Task",
+                "Resource": "${releaseFunction}",
+                "Next": "GenerateRecoveryGuide"
+              },
+              "GenerateRecoveryGuide": {
+                "Type": "Task",
+                "Resource": "${recoveryFunction}",
+                "End": true
+              }
+            }
+          }
+        - verifyFunction: !GetAtt EmergencyWorkflowFunction.Arn
+          planFunction: !GetAtt ContinuityPlanFunction.Arn
+          releaseFunction: !GetAtt DocumentVaultFunction.Arn
+          recoveryFunction: !GetAtt RecoveryAssistantFunction.Arn
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+
+  # ─── CloudTrail ──────────────────────────────────────────────
+  AuditLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "griefcart-${Environment}-audit"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKey
+
+  AuditLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${AuditLogBucket}"
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${AuditLogBucket}/*"
+            Condition:
+              StringEquals:
+                "s3:x-amz-acl": bucket-owner-full-control
+          - Sid: S3ServerAccessLogsWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${AuditLogBucket}/*"
+
+  CloudTrailTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub "griefcart-${Environment}-trail"
+      S3BucketName: !Ref AuditLogBucket
+      IsLogging: true
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub "arn:aws:s3:::${DocumentBucket}/"
+
+  # ─── Lambda — Cognito Triggers ──────────────────────────────
+  CognitoTriggersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-cognito-triggers"
+      CodeUri: lambdas/cognito-triggers/
+      Handler: index.lambda_handler
+      Timeout: 10
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — Document Vault ─────────────────────────────────
+  DocumentVaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-document-vault"
+      CodeUri: lambdas/document-vault/
+      Handler: index.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Environment:
+        Variables:
+          KMS_KEY_ID: !Ref KmsKey
+          DOCUMENT_BUCKET: !Ref DocumentBucket
+
+  # ─── Lambda — Financial Twin ─────────────────────────────────
+  FinancialTwinFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-financial-twin"
+      CodeUri: lambdas/financial-twin/
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 1024
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref FinancialTwinTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GraphSyncQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — Knowledge Graph Sync (SQS consumer) ───────────
+  KnowledgeGraphSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-graph-sync"
+      CodeUri: lambdas/knowledge-graph-sync/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - SQSPollerPolicy:
+            QueueName: !GetAtt GraphSyncQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        GraphSyncQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt GraphSyncQueue.Arn
+            BatchSize: 10
+
+  # ─── Lambda — Financial Detective ────────────────────────────
+  FinancialDetectiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-financial-detective"
+      CodeUri: lambdas/financial-detective/
+      Handler: index.lambda_handler
+      Timeout: 300
+      MemorySize: 1024
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+  # ─── Lambda — Continuity Scorer ──────────────────────────────
+  ContinuityScorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-continuity-scorer"
+      CodeUri: lambdas/continuity-scorer/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — Trusted Persons ───────────────────────────────
+  TrustedPersonsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-trusted-persons"
+      CodeUri: lambdas/trusted-persons/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action: [ses:SendEmail]
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:PutSecretValue
+                - secretsmanager:UpdateSecret
+              Resource: !Ref DocumentEncryptionContext
+
+  # ─── Lambda — Emergency Workflow ────────────────────────────
+  EmergencyWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-emergency-workflow"
+      CodeUri: lambdas/emergency-workflow/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:griefcart-${Environment}-emergency"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+  # ─── Lambda — Continuity Plan ───────────────────────────────
+  ContinuityPlanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-continuity-plan"
+      CodeUri: lambdas/continuity-plan/
+      Handler: index.lambda_handler
+      Timeout: 60
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — AI Chat ───────────────────────────────────────
+  AIChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-ai-chat"
+      CodeUri: lambdas/ai-chat/
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — Recovery Assistant ────────────────────────────
+  RecoveryAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-recovery-assistant"
+      CodeUri: lambdas/recovery-assistant/
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+
+  # ─── Lambda — Legacy Letters ────────────────────────────────
+  LegacyLettersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-legacy-letters"
+      CodeUri: lambdas/legacy-letters/
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LegacyLettersTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref LegacyLettersTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action: [s3:PutObject]
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action: [kms:Decrypt, kms:GenerateDataKey]
+              Resource: !GetAtt KmsKey.Arn
+
+  AuditTrailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-audit-trail"
+      CodeUri: lambdas/audit-trail/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudtrail:LookupEvents
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${AuditLogBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Environment:
+        Variables:
+          AUDIT_LOG_BUCKET: !Ref AuditLogBucket
+
+  # ─── API Gateway ────────────────────────────────────────────
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "griefcart-${Environment}-api"
+      StageName: v1
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            Identity:
+              Header: Authorization
+              ValidationExpression: "^.*"
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: "INFO"
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          ThrottlingRateLimit: 1000
+
+  # ─── API Routes ─────────────────────────────────────────────
+  DocumentsApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-documents-api"
+      CodeUri: lambdas/document-vault/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Environment:
+        Variables:
+          DOCUMENT_BUCKET: !Ref DocumentBucket
+          KMS_KEY_ID: !Ref KmsKey
+      Events:
+        Upload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /documents/upload
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /documents
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /documents/{id}
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /documents/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  FinancialTwinApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-twin-api"
+      CodeUri: lambdas/financial-twin/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref FinancialTwinTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GraphSyncQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        GetTwin:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /twin
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        QueryTwin:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /twin/query
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        RefreshTwin:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /twin/refresh
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DetectiveApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-detective-api"
+      CodeUri: lambdas/financial-detective/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action: [s3:GetObject]
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        Scan:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /detective/scan
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        FindMissing:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /detective/missing
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Subscriptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /detective/subscriptions
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  ContinuityScoreApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-score-api"
+      CodeUri: lambdas/continuity-scorer/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        GetScore:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /continuity-score
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  TrustedPersonsApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-trusted-api"
+      CodeUri: lambdas/trusted-persons/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref TrustedPersonsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action: [ses:SendEmail]
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        List:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /trusted-persons
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Add:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /trusted-persons
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Update:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /trusted-persons/{id}
+            Method: PUT
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Delete:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /trusted-persons/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  EmergencyWorkflowApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-emergency-api"
+      CodeUri: lambdas/emergency-workflow/
+      Handler: index.lambda_handler
+      Timeout: 30
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref EmergencyWorkflow
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - states:StartExecution
+              Resource: !Ref EmergencyWorkflow
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        Activate:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /emergency/activate
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Status:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /emergency/status
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  ContinuityPlanApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-plan-api"
+      CodeUri: lambdas/continuity-plan/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        GetPlan:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /continuity-plan
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GeneratePlan:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /continuity-plan/generate
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  AIChatApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-chat-api"
+      CodeUri: lambdas/ai-chat/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref FinancialTwinTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        SendMessage:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /chat
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  RecoveryAssistantApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-recovery-api"
+      CodeUri: lambdas/recovery-assistant/
+      Handler: index.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref TrustedPersonsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ContinuityPlansTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        Recovery:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /recovery/guide
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  LegacyLettersApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-legacy-api"
+      CodeUri: lambdas/legacy-letters/
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LegacyLettersTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref LegacyLettersTable
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Ref GeminiApiKeySecretArn
+            - Effect: Allow
+              Action: [s3:PutObject]
+              Resource: !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Effect: Allow
+              Action: [kms:Decrypt, kms:GenerateDataKey]
+              Resource: !GetAtt KmsKey.Arn
+      Events:
+        SaveAnswers:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /legacy
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetAnswers:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /legacy
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GenerateLegacy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /legacy/generate
+            Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  AuditApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-audit-api"
+      CodeUri: lambdas/audit-trail/
+      Handler: index.lambda_handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [cloudtrail:LookupEvents]
+              Resource: "*"
+            - Effect: Allow
+              Action: [s3:GetObject]
+              Resource: !Sub "arn:aws:s3:::${AuditLogBucket}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt KmsKey.Arn
+      Environment:
+        Variables:
+          AUDIT_LOG_BUCKET: !Ref AuditLogBucket
+      Events:
+        GetAuditLog:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /audit
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  AuthApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "griefcart-${Environment}-auth-api"
+      CodeUri: lambdas/auth/
+      Handler: index.lambda_handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminInitiateAuth
+                - cognito-idp:AdminConfirmSignUp
+                - cognito-idp:SignUp
+                - cognito-idp:AdminGetUser
+                - cognito-idp:GetUser
+              Resource: !GetAtt CognitoUserPool.Arn
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPool
+          COGNITO_CLIENT_ID: !Ref CognitoUserPoolClient
+          USERS_TABLE: !Ref UsersTable
+      Events:
+        DemoLogin:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/demo
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        GetProfile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/me
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+        Login:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/login
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        Register:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/register
+            Method: POST
+            Auth:
+              Authorizer: NONE
+
+  # ─── Step Functions Role ────────────────────────────────────
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "griefcart-${Environment}-step-functions"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [lambda:InvokeFunction, kms:Decrypt, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: "*"
+
+Outputs:
+  ApiEndpoint:
+    Description: "API Gateway endpoint"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  CognitoDomain:
+    Description: "Cognito Hosted UI domain (prefix with https:// and suffix with .auth.REGION.amazoncognito.com)"
+    Value: !Sub "griefcart-${Environment}"
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref CognitoUserPool
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID"
+    Value: !Ref CognitoUserPoolClient
+  DocumentBucketName:
+    Description: "S3 Document Vault"
+    Value: !Ref DocumentBucket
+  KmsKeyId:
+    Description: "KMS Key ID"
+    Value: !Ref KmsKey
+  StateMachineArn:
+    Description: "Emergency Step Functions state machine ARN"
+    Value: !Ref EmergencyWorkflow

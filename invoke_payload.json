@@ -1,0 +1,1 @@
+{"httpMethod":"GET","path":"/trusted-persons","requestContext":{"authorizer":{"claims":{"sub":"64e86468-b071-70af-3a49-32e9af144168","cognito:username":"Jacksonfio"}}}}

@@ -1,0 +1,17 @@
+# Render Blueprint for GriefCart
+services:
+  - type: web
+    name: griefcart
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: cd server && npm install
+    startCommand: cd server && node index.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+    healthCheckPath: /api/auth/verify

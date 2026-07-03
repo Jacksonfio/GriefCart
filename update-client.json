@@ -1,0 +1,23 @@
+{
+    "UserPoolId": "us-east-1_98uFET11T",
+    "ClientId": "61ho55j2698boup2aq6j5gkhel",
+    "ExplicitAuthFlows": [
+        "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+        "ALLOW_REFRESH_TOKEN_AUTH",
+        "ALLOW_USER_SRP_AUTH",
+        "ALLOW_USER_PASSWORD_AUTH"
+    ],
+    "SupportedIdentityProviders": ["COGNITO"],
+    "CallbackURLs": [
+        "http://localhost:5173",
+        "https://d1yywp83atcbrx.cloudfront.net"
+    ],
+    "LogoutURLs": [
+        "http://localhost:5173",
+        "https://d1yywp83atcbrx.cloudfront.net"
+    ],
+    "AllowedOAuthFlows": ["implicit"],
+    "AllowedOAuthScopes": ["openid", "email", "profile"],
+    "AllowedOAuthFlowsUserPoolClient": true,
+    "PreventUserExistenceErrors": "ENABLED"
+}
