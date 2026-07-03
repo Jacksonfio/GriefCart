@@ -1,121 +1,317 @@
-# GriefCart — Financial Continuity Platform
+# 🚀 GriefCart – AI-Powered Financial Continuity Platform
 
-Your AI-powered financial administrator. GriefCart automatically manages your finances when you can't — whether due to death, hospitalization, dementia, or any incapacity.
+> **Your AI-powered financial administrator that protects your loved ones when you're unable to manage your finances.**
 
-## Features
+GriefCart is a cloud-native financial continuity platform built using **AWS** and **Artificial Intelligence**. It securely stores financial documents, analyzes them using AI, creates a Financial Twin, and prepares trusted family members with recovery plans during emergencies such as hospitalization, dementia, disability, or death.
 
-### Auth
-Sign in with email/password or click "Try Demo" to jump right in. Uses Amazon Cognito for secure login.
+---
 
-### Dashboard
-Your main hub showing:
-- **Readiness Score** — How prepared you are (0-100)
-- **Assets Tracked** — What the AI has found in your documents
-- **Open Risks** — Things that need attention
-- **Recent Documents** — Your latest uploads
-- **Trusted Persons** — Who's verified and ready
-- **Plan Status** — What parts of your plan are complete
+# ✨ Features
 
-### Document Vault
-Upload financial documents (bank statements, insurance policies, investment accounts, etc.). Files are encrypted and stored securely in AWS S3. Click the arrow button on any document to view it in your browser.
+## 🔐 Secure Authentication
 
-### Financial Twin
-Click "Rebuild" and the AI reads all your uploaded documents, then creates a complete snapshot of your finances:
-- What you own (assets)
-- What you owe (liabilities)
-- Insurance policies
-- Recurring bills and subscriptions
+* Amazon Cognito Authentication
+* User Registration & Login
+* Email Verification
+* Forgot Password
+* Secure JWT Sessions
+* Protected Routes
 
-Then ask it questions like "What's my biggest risk?" or "Am I missing anything?"
+---
 
-### AI Detective
-Click "Run Scan" and the AI checks for:
-- **Missing Assets** — Things you might have forgotten (old 401k, life insurance, crypto)
-- **Hidden Subscriptions** — Forgotten payments still going out
-- **Document Gaps** — Important documents you haven't uploaded (will, power of attorney)
-- **Risk Indicators** — Patterns suggesting financial vulnerability
+## 📂 Secure Document Vault
 
-### Trusted Persons
-Add people you trust (spouse, child, lawyer, executor). They get an email invitation. You can delete them anytime. Their phone numbers are masked for privacy.
+* Upload financial documents
+* Multiple file upload
+* Secure AWS S3 Storage
+* Encrypted document storage
+* Download & Preview files
+* Persistent cloud storage
 
-### Continuity Plan
-Click "Generate Plan" and the AI creates a step-by-step timeline:
-- **Immediate** (first 24-72 hours)
-- **Week 1**
-- **Month 1**
-- **Month 3**
-- **Ongoing**
+Supported files:
 
-Each step has an action, who should do it, priority level, and document references.
+* PDF
+* DOCX
+* Images
+* ZIP
+* Financial Statements
+* Insurance Policies
 
-### Recovery Guide
-An AI-written guide for your trusted person explaining exactly what to do when something happens — who to call, where to find documents, which institutions to notify.
+---
 
-### Legacy Letters
-A 6-step wizard to write letters for your loved ones:
-1. Personal messages to each trusted person
-2. How you want assets handled
-3. Funeral and memorial wishes
-4. Digital accounts (social media, crypto)
-5. Final words
-6. AI composes everything into a warm letter
+## 🤖 AI Financial Twin
 
-Letters are stored encrypted and only released when the emergency workflow activates.
+Upload your financial documents and let AI automatically build your financial profile.
 
-### Incapacity Timeline
-A 4-stage timeline showing what happens at each stage:
-- **Alert** — Early signs (forgetfulness, missed patterns)
-- **Intervention** — Hospitalized, short-term
-- **Stewardship** — Long-term care (dementia, coma)
-- **Legacy** — End of life
+The AI identifies:
 
-Toggle on/off what should automatically happen at each stage.
+* Assets
+* Liabilities
+* Investments
+* Insurance
+* Loans
+* Recurring Bills
+* Financial Risks
 
-### AI Chat
-The chat bubble in the bottom-right corner. Ask anything about your finances and the AI answers using your actual data.
+Users can ask natural language questions like:
 
-### Emergency Workflow
-When activated, it verifies identity, checks your continuity plan, determines access level, releases documents and recovery guide to your trusted persons.
+* What assets do I own?
+* What is my biggest financial risk?
+* Which documents are missing?
+* What subscriptions am I paying for?
 
-### Continuity Score
-Your readiness score (0-100) is calculated from:
-- Documents uploaded (25 points)
-- How many document categories you've filled (20 points)
-- Verified trusted persons (25 points)
-- Legal documents present (10 points)
-- Insurance documents present (5 points)
-- Financial documents present (5 points)
-- Plan exists (5 points)
-- Plan is complete (5 points)
+---
 
-## How to Use
+## 🕵️ AI Detective
 
-1. **Sign in** — Use the demo account or create your own
-2. **Upload documents** — Go to Document Vault and upload bank statements, insurance policies, etc.
-3. **Click Rebuild** — On the Financial Twin page to let AI analyze your documents
-4. **Run a scan** — On the AI Detective page to find what's missing
-5. **Add trusted persons** — People who should have access in an emergency
-6. **Generate your plan** — On the Administration Plan page
-7. **Ask questions** — Use the AI Chat or Ask Your Twin
+Automatically scans uploaded documents and identifies:
 
-## Tech Stack
+* Missing Assets
+* Hidden Subscriptions
+* Missing Legal Documents
+* Financial Risks
+* Insurance Gaps
+* Estate Planning Issues
 
-- **Frontend**: React 19, TypeScript, Tailwind CSS 4, Vite 8
-- **Backend**: Python 3.12 AWS Lambda functions
-- **AI**: Google Gemini 2.5 Flash
-- **Auth**: Amazon Cognito
-- **Database**: Amazon DynamoDB (6 tables)
-- **Storage**: Amazon S3 (KMS-encrypted)
-- **API**: Amazon API Gateway (REST)
-- **Other**: SQS, SNS, SES, Step Functions, CloudTrail, EventBridge, KMS
+---
 
-## Running Locally
+## 👨‍👩‍👧 Trusted Person Management
+
+Users can securely add trusted family members.
+
+Features include:
+
+* Email Invitations
+* Verification
+* Permission Management
+* Emergency Access
+* Remove Trusted Person
+
+---
+
+## 📋 Financial Continuity Plan
+
+AI automatically generates a recovery roadmap including:
+
+* First 24 Hours
+* Week 1
+* Month 1
+* Long-Term Recovery
+
+Each task contains:
+
+* Priority
+* Responsible Person
+* Required Documents
+* Action Checklist
+
+---
+
+## 💌 Legacy Letters
+
+Securely create:
+
+* Personal Letters
+* Asset Instructions
+* Funeral Wishes
+* Digital Asset Instructions
+* Final Messages
+
+Letters remain encrypted until emergency release conditions are met.
+
+---
+
+## 🚨 Emergency Workflow
+
+When activated, GriefCart automatically:
+
+* Verifies emergency status
+* Validates trusted person access
+* Releases approved documents
+* Shares recovery guides
+* Notifies trusted contacts
+
+---
+
+## 📈 Continuity Score
+
+The platform evaluates financial readiness based on:
+
+* Uploaded Documents
+* Insurance Coverage
+* Legal Documents
+* Trusted Persons
+* AI Financial Twin
+* Recovery Plan Completion
+
+---
+
+# ☁ AWS Cloud Architecture
+
+GriefCart is powered by AWS cloud services.
+
+| Service            | Purpose                            |
+| ------------------ | ---------------------------------- |
+| Amazon Cognito     | Authentication & User Management   |
+| Amazon S3          | Secure Document Storage            |
+| Amazon DynamoDB    | User & Metadata Storage            |
+| AWS Lambda         | Serverless Backend                 |
+| Amazon API Gateway | REST APIs                          |
+| Amazon SES         | Email Verification & Notifications |
+| Amazon EventBridge | Workflow Automation                |
+| AWS Step Functions | Emergency Workflow                 |
+| AWS IAM            | Access Control                     |
+| AWS KMS            | Encryption                         |
+| Amazon CloudWatch  | Monitoring & Logs                  |
+
+---
+
+# 🧠 AI Features
+
+* AI Financial Twin
+* AI Chat Assistant
+* Financial Risk Analysis
+* Smart Recommendations
+* Document Summarization
+* Intelligent Search
+* Emergency Planning
+* Recovery Guide Generation
+
+---
+
+# 🛠 Tech Stack
+
+### Frontend
+
+* React
+* TypeScript
+* Vite
+* Tailwind CSS
+* Framer Motion
+
+### Backend
+
+* Python
+* AWS Lambda
+* REST API
+
+### Database
+
+* Amazon DynamoDB
+
+### Cloud
+
+* AWS
+
+### AI
+
+* Amazon Bedrock (or Gemini fallback)
+
+---
+
+# 📂 Project Structure
+
+```text
+frontend/
+backend/
+lambda/
+components/
+pages/
+services/
+api/
+hooks/
+utils/
+aws/
+public/
+```
+
+---
+
+# 🚀 Getting Started
+
+## Clone Repository
+
+```bash
+git clone <repository-url>
+```
+
+## Install Dependencies
 
 ```bash
 npm install
+```
+
+## Configure Environment Variables
+
+Create a `.env` file and configure:
+
+```env
+AWS_REGION=
+COGNITO_USER_POOL_ID=
+COGNITO_CLIENT_ID=
+S3_BUCKET_NAME=
+DYNAMODB_TABLE_NAME=
+SES_FROM_EMAIL=
+BEDROCK_MODEL_ID=
+GEMINI_API_KEY=
+```
+
+## Start Development Server
+
+```bash
 npm run dev
 ```
 
-## Environment Variables
+---
 
-See `.env.example` for the required environment variables.
+# 📦 Production Deployment
+
+The application can be deployed using:
+
+* AWS Amplify
+* AWS App Runner
+* AWS Lambda
+* Amazon S3
+* Amazon CloudFront
+* Vercel (Frontend)
+* Render (Backend)
+
+---
+
+# 🔒 Security
+
+* JWT Authentication
+* IAM Roles
+* Secure S3 Buckets
+* Server-Side Encryption (KMS)
+* Input Validation
+* Secure APIs
+* Rate Limiting
+* Environment Variable Protection
+
+---
+
+# 🎯 Project Highlights
+
+* Production-ready architecture
+* Real AWS cloud integration
+* AI-powered financial intelligence
+* Secure document management
+* Emergency continuity planning
+* Trusted person verification
+* Serverless backend
+* Cloud-native deployment
+* Responsive modern UI
+* Real-time workflows
+
+---
+
+# 📜 License
+
+This project is intended for educational purposes, hackathons, and innovation challenges.
+
+---
+
+## ❤️ Built with AWS + AI
+
+GriefCart empowers families by ensuring financial continuity when life takes an unexpected turn. By combining secure AWS cloud services with AI-driven insights, it transforms complex financial preparedness into an accessible, reliable, and compassionate experience.
