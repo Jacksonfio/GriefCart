@@ -71,7 +71,7 @@ export const Auth = {
           email: payload.email || payload['cognito:username'] || '',
           name: payload.name || '',
         }));
-      } catch {}
+      } catch { }
       window.location.hash = '';
     }
   },
@@ -165,6 +165,10 @@ export async function sendChatMessage(message: string, history: import('@/types'
 
 export async function runDetectiveScan() {
   return request<import('@/types').DetectiveResult>('/detective/scan', { method: 'POST' });
+}
+
+export async function runStressTest() {
+  return request<import('@/types').StressTestResult>('/detective/stress-test', { method: 'POST' });
 }
 
 export async function getRecoveryGuide() {

@@ -95,6 +95,13 @@ export interface RecoveryGuide {
   trustedPersonCount: number; hasPlan: boolean;
 }
 
+export interface StressTestResult {
+  survivalMonths: number;
+  criticalGaps: string[];
+  report: string;
+  actionableSteps: string[];
+}
+
 export interface LegacyAnswers {
   legacyId: string;
   userId: string;

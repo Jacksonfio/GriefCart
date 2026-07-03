@@ -318,7 +318,7 @@ async function callBedrock(prompt, system, maxTokens, temperature) {
     console.error("Please install @aws-sdk/client-bedrock-runtime to use AWS Bedrock.");
     return fallbackResponse(prompt);
   }
-  
+
   const client = new BedrockRuntimeClient({ region: AWS_REGION });
   const messages = [];
   if (system) {
@@ -367,12 +367,12 @@ async function callBedrock(prompt, system, maxTokens, temperature) {
 async function callHuggingFace(prompt, system, maxTokens, temperature) {
   if (!HF_API_KEY_SECRET) return fallbackResponse(prompt);
   let hfToken = HF_API_KEY_SECRET;
-  
+
   // Try resolving ARN via aws-sdk in reality, but this is a demo environment
   // and we might be passing the actual token via HF_TOKEN in Spaces.
-  
+
   const formattedPrompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n${system || 'You are a helpful assistant.'}<|eot_id|><|start_header_id|>user<|end_header_id|>\n${prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n`;
-  
+
   const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL_ID}`, {
     method: 'POST',
     headers: {
@@ -550,7 +550,7 @@ app.post('/api/auth/demo', async (req, res) => {
   await getDb();
   const demoEmail = 'demo@griefcart.app';
   let user = queryOne('SELECT * FROM users WHERE email = ?', [demoEmail]);
-  
+
   if (!user) {
     const userId = uuidv4();
     const password = bcrypt.hashSync('demo1234', 10);
@@ -559,11 +559,11 @@ app.post('/api/auth/demo', async (req, res) => {
     ]);
     await seedDemoData(userId);
     user = queryOne('SELECT * FROM users WHERE email = ?', [demoEmail]);
-    
+
     const token = jwt.sign({ userId: user.userId, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ token, userId: user.userId, email: demoEmail, message: 'Demo account created with sample data!' });
   }
-  
+
   run("UPDATE users SET lastLoginAt = datetime('now','localtime'), loginCount = loginCount + 1 WHERE userId = ?", [user.userId]);
   const token = jwt.sign({ userId: user.userId, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, userId: user.userId, email: demoEmail, message: 'Welcome back to the demo!' });
@@ -688,7 +688,7 @@ app.post('/api/documents/upload/base64', auth, async (req, res) => {
 app.delete('/api/documents/:id', auth, (req, res) => {
   const doc = queryOne('SELECT * FROM documents WHERE documentId = ? AND userId = ?', [req.params.id, req.userId]);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
-  
+
   if (doc.filePath && fs.existsSync(doc.filePath)) fs.unlinkSync(doc.filePath);
   run('DELETE FROM documents WHERE documentId = ?', [req.params.id]);
   res.json({ deleted: req.params.id });
@@ -727,7 +727,7 @@ app.get('/api/trusted-persons/verify/:token', async (req, res) => {
 
 app.put('/api/trusted-persons/:id', auth, (req, res) => {
   const { name, email, phone, relationship, priority, accessLevel, canViewDocuments, canContactInstitutions } = req.body;
-  
+
   const updates = [];
   const params = [];
   if (name !== undefined) { updates.push('name = ?'); params.push(name); }
@@ -738,9 +738,9 @@ app.put('/api/trusted-persons/:id', auth, (req, res) => {
   if (accessLevel !== undefined) { updates.push('accessLevel = ?'); params.push(accessLevel); }
   if (canViewDocuments !== undefined) { updates.push('canViewDocuments = ?'); params.push(canViewDocuments ? 1 : 0); }
   if (canContactInstitutions !== undefined) { updates.push('canContactInstitutions = ?'); params.push(canContactInstitutions ? 1 : 0); }
-  
+
   if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
-  
+
   params.push(req.params.id, req.userId);
   run(`UPDATE trusted_persons SET ${updates.join(', ')} WHERE personId = ? AND userId = ?`, params);
   res.json({ updated: req.params.id });
@@ -775,31 +775,39 @@ app.post('/api/continuity-plan/generate', auth, (req, res) => {
   if (existingPlan) {
     return res.json({ planId: existingPlan.planId, generatedAt: existingPlan.generatedAt, status: existingPlan.status });
   }
-  
+
   const planId = uuidv4();
   const phases = [
-    { phase: 'alert', title: 'Immediate Alert (Days 1-3)', actions: [
-      { action: 'Notify trusted persons', assignedTo: 'Primary Contact', priority: 'high', documentRefs: [], details: 'Contact your designated trusted persons immediately.' },
-      { action: 'Secure critical documents', assignedTo: 'Self', priority: 'high', documentRefs: [], details: 'Locate and secure all critical documents (will, insurance, deeds).' },
-    ]},
-    { phase: 'intervention', title: 'Intervention (Days 4-14)', actions: [
-      { action: 'Contact financial institutions', assignedTo: 'Trusted Person', priority: 'high', documentRefs: [], details: 'Notify banks, investment firms, and insurance companies.' },
-      { action: 'Review and pay bills', assignedTo: 'Trusted Person', priority: 'high', documentRefs: [], details: 'Review all recurring payments and ensure bills are paid.' },
-    ]},
-    { phase: 'stewardship', title: 'Stewardship (Weeks 3-8)', actions: [
-      { action: 'File insurance claims', assignedTo: 'Legal Counsel', priority: 'medium', documentRefs: [], details: 'Process all applicable insurance claims.' },
-      { action: 'Manage assets and investments', assignedTo: 'Financial Advisor', priority: 'medium', documentRefs: [], details: 'Review and manage the investment portfolio.' },
-    ]},
-    { phase: 'legacy', title: 'Legacy (Months 2-6)', actions: [
-      { action: 'Execute will and distribute assets', assignedTo: 'Executor', priority: 'medium', documentRefs: [], details: 'Process will through probate and distribute assets.' },
-      { action: 'File final tax returns', assignedTo: 'Tax Professional', priority: 'medium', documentRefs: [], details: 'Prepare and file all required tax returns.' },
-    ]},
+    {
+      phase: 'alert', title: 'Immediate Alert (Days 1-3)', actions: [
+        { action: 'Notify trusted persons', assignedTo: 'Primary Contact', priority: 'high', documentRefs: [], details: 'Contact your designated trusted persons immediately.' },
+        { action: 'Secure critical documents', assignedTo: 'Self', priority: 'high', documentRefs: [], details: 'Locate and secure all critical documents (will, insurance, deeds).' },
+      ]
+    },
+    {
+      phase: 'intervention', title: 'Intervention (Days 4-14)', actions: [
+        { action: 'Contact financial institutions', assignedTo: 'Trusted Person', priority: 'high', documentRefs: [], details: 'Notify banks, investment firms, and insurance companies.' },
+        { action: 'Review and pay bills', assignedTo: 'Trusted Person', priority: 'high', documentRefs: [], details: 'Review all recurring payments and ensure bills are paid.' },
+      ]
+    },
+    {
+      phase: 'stewardship', title: 'Stewardship (Weeks 3-8)', actions: [
+        { action: 'File insurance claims', assignedTo: 'Legal Counsel', priority: 'medium', documentRefs: [], details: 'Process all applicable insurance claims.' },
+        { action: 'Manage assets and investments', assignedTo: 'Financial Advisor', priority: 'medium', documentRefs: [], details: 'Review and manage the investment portfolio.' },
+      ]
+    },
+    {
+      phase: 'legacy', title: 'Legacy (Months 2-6)', actions: [
+        { action: 'Execute will and distribute assets', assignedTo: 'Executor', priority: 'medium', documentRefs: [], details: 'Process will through probate and distribute assets.' },
+        { action: 'File final tax returns', assignedTo: 'Tax Professional', priority: 'medium', documentRefs: [], details: 'Prepare and file all required tax returns.' },
+      ]
+    },
   ];
-  
+
   run('INSERT INTO continuity_plans (planId, userId, status, phases) VALUES (?, ?, ?, ?)', [
     planId, req.userId, 'active', JSON.stringify(phases)
   ]);
-  
+
   res.json({ planId, generatedAt: new Date().toISOString(), status: 'active', phases });
 });
 
@@ -853,7 +861,7 @@ app.get('/api/twin', auth, (req, res) => {
 app.post('/api/twin/query', auth, async (req, res) => {
   const { question } = req.body;
   const twin = queryOne('SELECT * FROM financial_twins WHERE userId = ? ORDER BY generatedAt DESC', [req.userId]);
-  
+
   const context = twin ? JSON.stringify({
     profile: JSON.parse(twin.profile),
     assets: JSON.parse(twin.assets),
@@ -861,10 +869,10 @@ app.post('/api/twin/query', auth, async (req, res) => {
     insurance: JSON.parse(twin.insurance),
     risks: JSON.parse(twin.risks),
   }, null, 2) : 'No financial twin data available yet.';
-  
+
   const prompt = `User Question: ${question}\n\nFinancial Twin Data:\n${context}\n\nAnswer the question based on the financial twin data. Be specific and reference actual values when available.`;
   const answer = await callLLM(prompt, "You are a financial analysis AI assistant. Answer questions about the user's financial data.", 800, 0.7);
-  
+
   res.json({ answer, twinGeneratedAt: twin?.generatedAt || new Date().toISOString() });
 });
 
@@ -898,15 +906,70 @@ app.post('/api/twin/refresh', auth, async (req, res) => {
 });
 
 // ─── Detective ─────────────────────────────────────────────
+app.post('/api/detective/stress-test', auth, async (req, res) => {
+  const docs = queryAll('SELECT * FROM documents WHERE userId = ?', [req.userId]);
+  const twin = queryOne('SELECT * FROM financial_twins WHERE userId = ? ORDER BY generatedAt DESC', [req.userId]);
+
+  if (docs.length === 0 && !twin) {
+    return res.json({
+      survivalMonths: 0,
+      criticalGaps: ['No financial data available to simulate.'],
+      report: 'Please upload documents or generate a financial twin first.',
+      actionableSteps: ['Upload banking statements']
+    });
+  }
+
+  let financialData = '';
+  if (twin) {
+    const assets = JSON.parse(twin.assets);
+    const totalValue = assets.filter(a => a.value).reduce((sum, a) => sum + parseFloat(a.value?.replace(/[$,]/g, '') || 0), 0);
+    financialData = `Total estimated liquid assets: $${totalValue.toLocaleString()}. Extracted profile: ${twin.profile}`;
+  } else {
+    financialData = `User has ${docs.length} financial documents uploaded: ` + docs.map(d => d.category).join(', ');
+  }
+
+  const prompt = `Run a 6-month severe financial stress test (e.g. unexpected medical emergency or sudden job loss) on this user's data:
+${financialData}
+
+Based on this limited snapshot, provide:
+1. Estimated survival months (0-12) as an integer.
+2. 2-3 critical gaps or breaking points.
+3. A short, empathetic analysis report.
+4. 2-3 actionable steps to improve resilience.
+
+Respond strictly in this JSON format without markdown ticks:
+{
+  "survivalMonths": 3,
+  "criticalGaps": ["gap 1"],
+  "report": "text here",
+  "actionableSteps": ["step 1"]
+}`;
+
+  const responseText = await callLLM(prompt, "You are an expert actuary and financial risk AI.", 1000, 0.5);
+
+  try {
+    const aiResult = JSON.parse(responseText.replace(/```json/g, '').replace(/```/g, ''));
+    res.json(aiResult);
+  } catch (e) {
+    console.error("AI did not return JSON for stress test:", responseText);
+    res.json({
+      survivalMonths: 1,
+      criticalGaps: ["AI failed to generate a precise projection"],
+      report: responseText,
+      actionableSteps: ["Upload more diverse account types"]
+    });
+  }
+});
+
 app.post('/api/detective/scan', auth, (req, res) => {
   const docs = queryAll('SELECT category, COUNT(*) as count FROM documents WHERE userId = ? GROUP BY category', [req.userId]);
   const docCount = docs.reduce((sum, d) => sum + d.count, 0);
-  
+
   const missingAssets = [];
   const hiddenSubscriptions = [];
   const documentGaps = [];
   const riskIndicators = [];
-  
+
   const categories = docs.map(d => d.category);
   if (!categories.includes('banking')) {
     missingAssets.push({ type: 'bank_account', suggested: 'Add bank statements to detect accounts', reason: 'No banking documents found', confidence: 90 });
@@ -917,26 +980,26 @@ app.post('/api/detective/scan', auth, (req, res) => {
   if (!categories.includes('investment') || !categories.includes('property')) {
     missingAssets.push({ type: 'investment_or_property', suggested: 'Add investment statements and property deeds', reason: 'Investment or property documents missing', confidence: 75 });
   }
-  
+
   if (!categories.includes('legal')) {
     documentGaps.push({ documentType: 'Will/Trust', importance: 'critical', reason: 'No legal documents found - essential for estate planning' });
   }
   if (!categories.includes('tax')) {
     documentGaps.push({ documentType: 'Tax Returns', importance: 'high', reason: 'Tax returns needed for financial completeness' });
   }
-  
+
   if (docCount < 5) {
     riskIndicators.push({ type: 'low_documentation', description: 'Only ' + docCount + ' documents uploaded', severity: 'high' });
   }
-  
+
   if (Math.random() > 0.5) {
     hiddenSubscriptions.push({ name: 'Old streaming service', estimatedAmount: '$14.99/mo', reason: 'Possible forgotten subscription', confidence: 65 });
   }
-  
-  const summary = docCount === 0 
+
+  const summary = docCount === 0
     ? 'No documents uploaded yet. Upload bank statements, insurance policies, and investment documents to start the analysis.'
     : `Analysis complete based on ${docCount} documents. ${missingAssets.length} potential missing assets identified. ${riskIndicators.length} risk indicators found.`;
-  
+
   res.json({ missingAssets, hiddenSubscriptions, documentGaps, riskIndicators, summary });
 });
 
@@ -944,19 +1007,19 @@ app.post('/api/detective/scan', auth, (req, res) => {
 app.post('/api/chat', auth, async (req, res) => {
   const { message, history } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
-  
+
   const user = queryOne('SELECT * FROM users WHERE userId = ?', [req.userId]);
   const docs = queryAll('SELECT COUNT(*) as count FROM documents WHERE userId = ?', [req.userId]);
   const docCount = docs[0]?.count || 0;
   const twin = queryOne('SELECT * FROM financial_twins WHERE userId = ? ORDER BY generatedAt DESC', [req.userId]);
-  
+
   let contextStr = `User email: ${user?.email || 'unknown'}\nDocuments uploaded: ${docCount}\n`;
   if (twin) {
     const assets = JSON.parse(twin.assets);
     const totalValue = assets.filter(a => a.value).reduce((sum, a) => sum + parseFloat(a.value?.replace(/[$,]/g, '') || 0), 0);
     contextStr += `Total assets found: ${assets.length}\nEstimated net worth from documents: $${totalValue.toLocaleString()}\n`;
   }
-  
+
   const systemPrompt = `You are GriefCart's AI Financial Continuity Assistant, a compassionate and knowledgeable financial planning AI. You help users manage their financial life, plan for incapacity, and ensure their loved ones are taken care of.
 
 Key areas you assist with:
@@ -969,14 +1032,14 @@ Key areas you assist with:
 7. AI Detective scans for missing assets
 
 Be concise, specific, and compassionate. Use the user's actual data when available. If they ask about something beyond your scope, suggest relevant features of GriefCart.`;
-  
+
   const chatPrompt = `User Context:\n${contextStr}\n\nConversation history (last 5):\n${JSON.stringify((history || []).slice(-5))}\n\nUser: ${message}\n\nProvide a helpful, specific response using the user's data context.`;
-  
-  const answer = await callGemini(chatPrompt, systemPrompt, 800, 0.7);
-  
+
+  const answer = await callLLM(chatPrompt, systemPrompt, 800, 0.7);
+
   run('INSERT INTO chat_history (userId, role, content) VALUES (?, ?, ?)', [req.userId, 'user', message]);
   run('INSERT INTO chat_history (userId, role, content) VALUES (?, ?, ?)', [req.userId, 'assistant', answer]);
-  
+
   res.json({ message: answer, timestamp: new Date().toISOString(), hasTwin: !!twin });
 });
 
@@ -985,7 +1048,7 @@ app.get('/api/recovery/guide', auth, (req, res) => {
   const docCount = queryAll('SELECT COUNT(*) as count FROM documents WHERE userId = ?', [req.userId])[0]?.count || 0;
   const personCount = queryAll('SELECT COUNT(*) as count FROM trusted_persons WHERE userId = ?', [req.userId])[0]?.count || 0;
   const plan = queryOne('SELECT * FROM continuity_plans WHERE userId = ?', [req.userId]);
-  
+
   res.json({
     guide: `# Financial Recovery Guide\n\n## Overview\nThis guide is designed to help your loved ones navigate your financial affairs during difficult times.\n\n## Immediate Steps\n1. Notify all trusted persons on your contact list\n2. Secure your financial documents and accounts\n3. Contact key financial institutions\n\n## Key Contacts\n- Primary Contact: Designated trusted person\n- Financial Advisor: If applicable\n- Legal Counsel: If applicable\n\n## Documents Needed\nReview the Document Vault for wills, trusts, insurance policies, and account statements.\n\n## Important Notes\n- Keep all correspondence and receipts\n- Notify government agencies as needed\n- Take your time with major decisions`,
     generatedAt: new Date().toISOString(),
@@ -1026,9 +1089,9 @@ app.get('/api/legacy', auth, (req, res) => {
 
 app.post('/api/legacy', auth, (req, res) => {
   const { personalMessages, financialWishes, funeralPreferences, digitalLegacy, finalWords, status } = req.body;
-  
+
   const existing = queryOne('SELECT * FROM legacy_letters WHERE userId = ? ORDER BY updatedAt DESC', [req.userId]);
-  
+
   if (existing) {
     const updates = [];
     const params = [];
@@ -1038,21 +1101,21 @@ app.post('/api/legacy', auth, (req, res) => {
     if (digitalLegacy !== undefined) { updates.push('digitalLegacy = ?'); params.push(digitalLegacy); }
     if (finalWords !== undefined) { updates.push('finalWords = ?'); params.push(finalWords); }
     updates.push("updatedAt = datetime('now','localtime')");
-    
+
     if (status === 'complete') {
       updates.push('status = ?');
       params.push('complete');
       updates.push("completedAt = datetime('now','localtime')");
     }
-    
+
     if (updates.length > 1) {
       params.push(existing.legacyId);
       run(`UPDATE legacy_letters SET ${updates.join(', ')} WHERE legacyId = ?`, params);
     }
-    
+
     return res.json({ legacyId: existing.legacyId, status: status || existing.status, updatedAt: new Date().toISOString() });
   }
-  
+
   const legacyId = uuidv4();
   run('INSERT INTO legacy_letters (legacyId, userId, personalMessages, financialWishes, funeralPreferences, digitalLegacy, finalWords, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
     legacyId, req.userId,
@@ -1063,15 +1126,15 @@ app.post('/api/legacy', auth, (req, res) => {
     finalWords || '',
     status || 'draft'
   ]);
-  
+
   res.json({ legacyId, status: status || 'draft', updatedAt: new Date().toISOString() });
 });
 
 app.post('/api/legacy/generate', auth, (req, res) => {
   const legacy = queryOne('SELECT * FROM legacy_letters WHERE userId = ? ORDER BY updatedAt DESC', [req.userId]);
-  
+
   const content = `# Legacy Document\n\n## My Final Wishes\n\n### Financial Wishes\n${legacy?.financialWishes || 'Not specified'}\n\n### Funeral Preferences\n${legacy?.funeralPreferences || 'Not specified'}\n\n### Digital Legacy\n${legacy?.digitalLegacy || 'Nothing specified'}\n\n### Final Words\n${legacy?.finalWords || ''}\n\n### Personal Messages\n${legacy?.personalMessages ? JSON.parse(legacy.personalMessages).map(m => `\n**To ${m.personName}:**\n${m.message}`).join('\n') : 'None'}\n\n---\n*Generated by GriefCart Financial Continuity Platform*\n*Date: ${new Date().toLocaleDateString()}*`;
-  
+
   res.json({
     documentId: uuidv4(),
     legacyId: legacy?.legacyId || '',
@@ -1086,7 +1149,7 @@ app.get('/api/emergency/status', auth, (req, res) => {
   const persons = queryAll('SELECT COUNT(*) as count FROM trusted_persons WHERE userId = ?', [req.userId]);
   const verified = queryAll("SELECT COUNT(*) as count FROM trusted_persons WHERE userId = ? AND verificationStatus = 'verified'", [req.userId]);
   const plan = queryAll('SELECT COUNT(*) as count FROM continuity_plans WHERE userId = ?', [req.userId]);
-  
+
   res.json({
     verifiedTrustedPersons: verified[0]?.count || 0,
     totalTrustedPersons: persons[0]?.count || 0,

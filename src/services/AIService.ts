@@ -36,7 +36,7 @@ async function request<T>(path: string, opts: AIRequestOptions = {}): Promise<T>
 
 export const AIService = {
   async chat(message: string, history: Array<{ role: 'user' | 'assistant'; content: string }> = []) {
-    return request<{ message: string; timestamp: string; hasTwin: boolean }>('/chat', {
+    return request<{ message: string; timestamp: string; hasTwin: boolean }>('/ai/chat', {
       method: 'POST',
       body: { message, history },
     });
