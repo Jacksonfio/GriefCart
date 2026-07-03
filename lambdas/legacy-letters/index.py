@@ -1,95 +1,70 @@
-import json, os, time, uuid, boto3, urllib.request, urllib.error
+"""
+Legacy Letters Lambda — powered by AWS Bedrock (Meta Llama 3 / open-source models)
+Transforms a person's wishes and instructions into a beautiful, compassionate legacy document.
+"""
+import json, os, sys, re, uuid, boto3
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+from llm_client import call_llm
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
-secretsmanager = boto3.client("secretsmanager")
 
 TABLE = dynamodb.Table(os.environ["LEGACY_TABLE"])
 DOC_BUCKET = os.environ["DOCUMENT_BUCKET"]
 
-GEMINI_MODEL = "gemini-2.5-flash"
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
-
-
-def call_llm(messages, system=None, max_tokens=2000, temperature=0.8, json_mode=False):
-    if LLM_PROVIDER != "gemini":
-        return ""
-    resp = secretsmanager.get_secret_value(SecretId=os.environ["GEMINI_API_KEY_SECRET"])
-    api_key = resp["SecretString"]
-    body = {
-        "contents": [{"parts": [{"text": m["content"]}]} for m in messages],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    max_retries = 4
-    resp_data = None
-    for attempt in range(max_retries + 1):
-        try:
-            req = urllib.request.Request(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}",
-                data=json.dumps(body).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp_data = json.loads(urllib.request.urlopen(req).read())
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"call_llm HTTPError: {e.code} {e.read().decode()[:200]}")
-            return ""
-    if not resp_data:
-        print("call_llm: No response data after retries")
-        return ""
-    candidates = resp_data.get("candidates", [])
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "")
-    return ""
-
-LEGACY_PROMPT = """You are an AI Legacy Letter composer for GriefCart. Your role is to transform a person's answers about their financial and personal wishes into a beautiful, compassionate legacy document.
+LEGACY_SYSTEM_PROMPT = """You are an AI Legacy Letter composer for GriefCart. Your role is to transform a person's thoughts, wishes, and financial instructions into a beautiful, dignified, deeply personal legacy document.
 
 The document should:
-- Be addressed to their trusted persons by name
-- Include specific financial instructions extracted from their answers
-- Weave in their personal messages verbatim where appropriate
-- Have a warm, dignified tone — not overly legal or cold
-- Be organized into clear sections
-- Include practical next steps for each trusted person
+- Open with a warm, personal greeting addressed to specific trusted persons by name
+- Weave the person's own words verbatim where given — don't paraphrase personal messages
+- Provide clear, numbered financial instructions so nothing is overlooked
+- Include specific instructions for digital accounts and assets
+- Close with meaningful final words that capture their voice and values
+- Have a warm but dignified tone — not legalistic, not cold, not overly formal
 
-Write in first person as if the user is speaking to their loved ones."""
+Write in first person as if the person is speaking directly to their loved ones.
+Structure with clear sections: Personal Messages, Financial Instructions, Digital Life, Funeral Preferences, Final Words."""
 
-def get_answers(legacy_id):
-    resp = TABLE.get_item(Key={"legacyId": legacy_id})
-    return resp.get("Item")
 
-def put_answers(item):
-    TABLE.put_item(Item=item)
+def generate_legacy(answers: dict) -> str:
+    personal_messages = answers.get("personalMessages", [])
+    recipients = [m.get("name", "My loved one") for m in personal_messages if m.get("name")]
 
-def generate_legacy(answers):
-    prompt = f"""Create a legacy document from these answers:
+    greeting = f"To {', '.join(recipients[:-1]) + ' and ' + recipients[-1] if len(recipients) > 1 else recipients[0] if recipients else 'My Loved Ones'}"
 
-Personal Messages to Trusted Persons:
-{json.dumps(answers.get('personalMessages', []), default=str)}
+    prompt = f"""Create a heartfelt legacy letter/document from these personal answers.
 
-Financial Wishes:
+Opening: "{greeting}"
+
+Personal Messages to Loved Ones:
+{json.dumps(personal_messages, default=str, indent=2) if personal_messages else "No specific personal messages provided"}
+
+Financial Wishes and Instructions:
 {answers.get('financialWishes', 'Not specified')}
 
-Funeral & Memorial Preferences:
+Funeral and Memorial Preferences:
 {answers.get('funeralPreferences', 'Not specified')}
 
-Digital Legacy Instructions:
+Digital Life Instructions (accounts, passwords, subscriptions to cancel):
 {answers.get('digitalLegacy', 'Not specified')}
 
 Final Words:
 {answers.get('finalWords', 'Not specified')}
 
-Write a warm, first-person legacy document that captures this person's voice and wishes."""
+Additional Notes:
+{answers.get('additionalNotes', '')}
 
-    return call_llm([{"role": "user", "content": prompt}], system=LEGACY_PROMPT, max_tokens=2000, temperature=0.8)
+Write a complete, beautiful legacy document. It should feel like a personal letter, not a legal document. Include all the specific financial and practical instructions clearly, but woven into a warm and personal narrative. This document will be treasured by the family."""
+
+    return call_llm(
+        [{"role": "user", "content": prompt}],
+        system=LEGACY_SYSTEM_PROMPT,
+        max_tokens=3000,
+        temperature=0.8,
+    )
+
 
 def lambda_handler(event, context):
     http = event.get("httpMethod", "GET")
@@ -126,15 +101,17 @@ def lambda_handler(event, context):
             "funeralPreferences": body.get("funeralPreferences", ""),
             "digitalLegacy": body.get("digitalLegacy", ""),
             "finalWords": body.get("finalWords", ""),
+            "additionalNotes": body.get("additionalNotes", ""),
             "updatedAt": now,
-            "completedAt": now if body.get("status") == "complete" else body.get("completedAt", None),
+            "completedAt": now if body.get("status") == "complete" else body.get("completedAt"),
         }
-        put_answers(item)
+        TABLE.put_item(Item=item)
         return respond(200, {"legacyId": legacy_id, "status": item["status"], "updatedAt": now})
 
     if http == "POST" and "/generate" in path:
         body = json.loads(event.get("body", "{}"))
         legacy_id = body.get("legacyId")
+
         if not legacy_id:
             resp = TABLE.query(
                 IndexName="userId-index",
@@ -145,26 +122,53 @@ def lambda_handler(event, context):
             )
             items = resp.get("Items", [])
             if not items:
-                return respond(400, {"error": "No legacy answers found. Save answers first."})
+                return respond(400, {"error": "No legacy answers found. Save your answers first."})
             legacy_id = items[0]["legacyId"]
 
-        answers = get_answers(legacy_id)
+        answers_resp = TABLE.get_item(Key={"legacyId": legacy_id})
+        answers = answers_resp.get("Item")
         if not answers:
             return respond(404, {"error": "Legacy answers not found"})
 
         content = generate_legacy(answers)
+        if not content:
+            return respond(500, {"error": "Failed to generate legacy letter. Please try again."})
+
+        # Store in S3 encrypted
         doc_id = str(uuid.uuid4())
         s3_key = f"legacy/{user_id}/{doc_id}.txt"
+        try:
+            s3.put_object(
+                Bucket=DOC_BUCKET,
+                Key=s3_key,
+                Body=content.encode("utf-8"),
+                ContentType="text/plain",
+                ServerSideEncryption="aws:kms",
+                SSEKMSKeyId=os.environ.get("KMS_KEY_ID", ""),
+                Metadata={
+                    "user-id": user_id,
+                    "legacy-id": legacy_id,
+                    "type": "legacy-letter",
+                    "generated-by": os.environ.get("LLM_PROVIDER", "bedrock"),
+                },
+            )
+        except Exception as e:
+            print(f"S3 store error (non-fatal): {e}")
 
-        s3.put_object(
-            Bucket=DOC_BUCKET,
-            Key=s3_key,
-            Body=content.encode("utf-8"),
-            ContentType="text/plain",
-            ServerSideEncryption="aws:kms",
-            SSEKMSKeyId=os.environ["KMS_KEY_ID"],
-            Metadata={"user-id": user_id, "legacy-id": legacy_id, "type": "legacy-letter"},
-        )
+        # Update legacy record with generated content preview
+        try:
+            TABLE.update_item(
+                Key={"legacyId": legacy_id},
+                UpdateExpression="SET #st = :status, documentId = :docId, generatedAt = :ts",
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={
+                    ":status": "generated",
+                    ":docId": doc_id,
+                    ":ts": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception as e:
+            print(f"DynamoDB update error (non-fatal): {e}")
 
         return respond(200, {
             "documentId": doc_id,
@@ -172,13 +176,20 @@ def lambda_handler(event, context):
             "content": content,
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "version": 1,
+            "provider": os.environ.get("LLM_PROVIDER", "bedrock"),
         })
 
     return respond(404, {"error": "Not found"})
 
+
 def respond(status, body):
     return {
         "statusCode": status,
-        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
         "body": json.dumps(body, default=str),
     }

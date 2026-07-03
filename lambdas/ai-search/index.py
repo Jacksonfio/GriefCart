@@ -1,78 +1,101 @@
-import json, os, time, boto3, urllib.request, urllib.error
+"""
+AI Search Lambda — powered by AWS Bedrock (Meta Llama 3 / open-source models)
+with HuggingFace Inference API fallback and Gemini legacy fallback.
+"""
+import json, os, sys, boto3
 from datetime import datetime, timezone
 
-secretsmanager = boto3.client("secretsmanager")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+from llm_client import call_llm
 
-GEMINI_MODEL = "gemini-2.5-flash"
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
+dynamodb = boto3.resource("dynamodb")
+DOCS_TABLE = dynamodb.Table(os.environ["DOCUMENTS_TABLE"])
 
+SEARCH_SYSTEM_PROMPT = """You are a financial document search expert. Given a search query about financial matters, 
+return a structured JSON search plan that identifies:
+1. Primary entities to look for (accounts, institutions, document types)
+2. Alternative and related search terms
+3. Most likely document categories to search in
+4. Key financial terms associated with the query
 
-def call_llm(messages, system=None, max_tokens=500, temperature=0.3, json_mode=False):
-    if LLM_PROVIDER != "gemini":
-        return ""
-    resp = secretsmanager.get_secret_value(SecretId=os.environ["GEMINI_API_KEY_SECRET"])
-    api_key = resp["SecretString"]
-    body = {
-        "contents": [{"parts": [{"text": m["content"]}]} for m in messages],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    max_retries = 4
-    resp_data = None
-    for attempt in range(max_retries + 1):
-        try:
-            req = urllib.request.Request(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}",
-                data=json.dumps(body).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp_data = json.loads(urllib.request.urlopen(req).read())
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"call_llm HTTPError: {e.code} {e.read().decode()[:200]}")
-            return ""
-    if not resp_data:
-        print("call_llm: No response data after retries")
-        return ""
-    candidates = resp_data.get("candidates", [])
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "")
-    return ""
+Always respond with valid JSON only."""
+
 
 def lambda_handler(event, context):
-    http = event.get("httpMethod", "POST")
     body = json.loads(event.get("body", "{}"))
     query = body.get("query", "")
-    user_id = event.get("requestContext", {}).get("authorizer", {}).get("claims", {}).get("sub", "")
+    user_id = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("claims", {})
+        .get("sub", "")
+    )
 
     if not query or not user_id:
-        return respond(400, {"error": "query required"})
+        return respond(400, {"error": "query and authentication required"})
 
-    search_prompt = f"""Given the search query: "{query}"
+    # Fetch user's document categories for context
+    try:
+        docs_resp = DOCS_TABLE.query(
+            IndexName="userId-index",
+            KeyConditionExpression="userId = :uid",
+            Limit=50,
+            ExpressionAttributeValues={":uid": user_id},
+        )
+        docs = docs_resp.get("Items", [])
+        categories = list(set(d.get("category", "unknown") for d in docs))
+        doc_names = [d.get("fileName", "") for d in docs[:20]]
+    except Exception:
+        categories = []
+        doc_names = []
 
-Return a structured search plan with:
-1. The key financial entities to search for
-2. Alternative search terms
-3. Categories to look in
+    search_prompt = f"""Search query: "{query}"
 
-Return as JSON."""
+User's document categories available: {", ".join(categories) if categories else "none uploaded yet"}
+Document names (sample): {", ".join(doc_names[:10]) if doc_names else "none"}
+
+Create a smart search plan as JSON:
+{{
+  "primaryTerms": ["main entities/terms to search for"],
+  "alternativeTerms": ["synonyms and related terms"],
+  "categories": ["document categories most relevant"],
+  "financialEntities": ["banks, insurers, accounts mentioned or implied"],
+  "dateRange": "any date context if relevant, else null",
+  "suggestedFilters": ["filter suggestions for better results"],
+  "confidence": 0-100
+}}"""
 
     try:
-        search_plan = call_llm([{"role": "user", "content": search_prompt}], max_tokens=500, temperature=0.3)
-    except Exception:
-        search_plan = json.dumps({"terms": [query], "categories": []})
+        search_plan_text = call_llm(
+            [{"role": "user", "content": search_prompt}],
+            system=SEARCH_SYSTEM_PROMPT,
+            max_tokens=500,
+            temperature=0.3,
+            json_mode=True,
+        )
+        try:
+            search_plan = json.loads(search_plan_text)
+        except (json.JSONDecodeError, TypeError):
+            search_plan = {"terms": [query], "categories": categories, "raw": search_plan_text}
+    except Exception as e:
+        search_plan = {"terms": [query], "categories": [], "error": str(e)[:100]}
 
-    return respond(200, {"query": query, "results": search_plan})
+    return respond(200, {
+        "query": query,
+        "results": search_plan,
+        "documentCount": len(docs) if "docs" in dir() else 0,
+        "provider": os.environ.get("LLM_PROVIDER", "bedrock"),
+    })
+
 
 def respond(status, body):
     return {
         "statusCode": status,
-        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
         "body": json.dumps(body, default=str),
     }

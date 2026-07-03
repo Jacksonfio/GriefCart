@@ -1,73 +1,50 @@
-import json, os, time, uuid, boto3, urllib.request, urllib.error
+"""
+Continuity Plan Lambda — powered by AWS Bedrock (Meta Llama 3 / open-source models)
+Generates a comprehensive, phased emergency continuity plan.
+"""
+import json, os, sys, re, uuid, boto3
 from datetime import datetime, timezone
 
-dynamodb = boto3.resource("dynamodb")
-secretsmanager = boto3.client("secretsmanager")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+from llm_client import call_llm
 
+dynamodb = boto3.resource("dynamodb")
 USERS_TABLE = dynamodb.Table(os.environ["USERS_TABLE"])
 DOCS_TABLE = dynamodb.Table(os.environ["DOCUMENTS_TABLE"])
 TRUSTED_TABLE = dynamodb.Table(os.environ["TRUSTED_PERSONS_TABLE"])
 PLANS_TABLE = dynamodb.Table(os.environ["CONTINUITY_PLANS_TABLE"])
 
-GEMINI_MODEL = "gemini-2.5-flash"
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
+PLAN_SYSTEM_PROMPT = """You are GriefCart's Continuity Plan Generator — an expert in estate planning, financial continuity, and emergency preparedness.
+
+Given a user's documents and trusted persons, generate a detailed, actionable emergency continuity plan covering:
+
+PHASE 1 — Immediate (0-24 hours): Urgent notifications, safety, access to funds
+PHASE 2 — Week 1: Legal notifications, document gathering, financial institution contacts
+PHASE 3 — Month 1: Asset consolidation, bill management, insurance claims initiation
+PHASE 4 — Month 3: Asset transfer, estate settlement, ongoing management setup
+PHASE 5 — Ongoing: Long-term management, tax obligations, monitoring
+
+For each action: specify WHO handles it, WHAT documents are needed, and WHY it's important.
+Always respond with valid JSON only."""
 
 
-def call_llm(messages, system=None, max_tokens=3000, temperature=0.4, json_mode=False):
-    if LLM_PROVIDER != "gemini":
-        return ""
-    resp = secretsmanager.get_secret_value(SecretId=os.environ["GEMINI_API_KEY_SECRET"])
-    api_key = resp["SecretString"]
-    body = {
-        "contents": [{"parts": [{"text": m["content"]}]} for m in messages],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-    }
-    if json_mode:
-        body["generationConfig"]["response_mime_type"] = "application/json"
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    max_retries = 4
-    resp_data = None
-    for attempt in range(max_retries + 1):
-        try:
-            req = urllib.request.Request(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}",
-                data=json.dumps(body).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            resp_data = json.loads(urllib.request.urlopen(req).read())
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            print(f"call_llm HTTPError: {e.code} {e.read().decode()[:200]}")
-            return ""
-    if not resp_data:
-        print("call_llm: No response data after retries")
-        return ""
-    candidates = resp_data.get("candidates", [])
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "")
-    return ""
+def extract_json(text: str) -> str:
+    text = text.strip()
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1] if len(parts) >= 2 else parts[0]
+    if text.startswith("json"):
+        text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end >= 0:
+        text = text[start:end + 1]
+    text = re.sub(r",\s*}", "}", text)
+    text = re.sub(r",\s*]", "]", text)
+    return text
 
-PLAN_PROMPT = """You are GriefCart's Continuity Plan Generator. Create a comprehensive emergency continuity plan.
 
-Given user data, generate a plan covering:
-
-1. IMMEDIATE ACTIONS (first 24-72 hours)
-2. WEEK 1: Notifications, document gathering, legal steps
-3. MONTH 1: Financial consolidation, bill management
-4. MONTH 3: Asset transfer, insurance claims
-5. ONGOING: Long-term management
-
-For each phase, list specific actions, which trusted person handles what, and references to relevant documents.
-
-Return as structured JSON with actionable steps."""
-
-def generate_plan(user_id):
+def generate_plan(user_id: str) -> dict:
     user_resp = USERS_TABLE.get_item(Key={"userId": user_id})
     user = user_resp.get("Item", {})
 
@@ -85,66 +62,115 @@ def generate_plan(user_id):
     )
     trusted = trusted_resp.get("Items", [])
 
-    doc_summary = "\n".join([f"- {d['fileName']} ({d['category']})" for d in docs])
-    trusted_summary = "\n".join([f"- {t.get('name')} ({t.get('relationship')}) - {t.get('accessLevel')} access - {'verified' if t.get('verificationStatus') == 'verified' else 'pending'}" for t in trusted])
+    doc_summary = "\n".join([
+        f"- {d['fileName']} ({d['category']}) — uploaded {d.get('uploadedAt', 'unknown')}"
+        for d in docs
+    ]) if docs else "No documents uploaded"
 
-    prompt = f"""Generate a continuity plan for {user.get('email')}.
+    trusted_summary = "\n".join([
+        f"- {t.get('name', 'Unknown')} ({t.get('relationship', 'unknown')}) — {t.get('accessLevel', 'none')} access — {'✓ verified' if t.get('verificationStatus') == 'verified' else '⚠ pending verification'} — {t.get('email', 'no email')}"
+        for t in trusted
+    ]) if trusted else "No trusted persons designated"
 
-Documents ({len(docs)}):
+    prompt = f"""Generate a complete emergency continuity plan for {user.get('email', 'this user')}.
+
+Documents available ({len(docs)} total):
 {doc_summary}
 
-Trusted Persons ({len(trusted)}):
+Trusted persons ({len(trusted)} designated):
 {trusted_summary}
 
-Return JSON:
+Return this exact JSON:
 {{
   "planId": "auto",
-  "generatedAt": "...",
+  "generatedAt": "{datetime.now(timezone.utc).isoformat()}",
+  "preparednessLevel": "low|medium|high|excellent",
   "phases": [
     {{
       "phase": "immediate|week1|month1|month3|ongoing",
-      "title": "...",
-      "actions": [{{"action": "...", "assignedTo": "person name or 'self'", "priority": "critical|high|medium|low", "documentRefs": ["referenced document names"], "details": "..."}}]
+      "title": "Phase title",
+      "timeframe": "e.g. First 24 hours",
+      "actions": [
+        {{
+          "action": "specific action to take",
+          "assignedTo": "person name or 'primary executor' or 'all trusted persons'",
+          "priority": "critical|high|medium|low",
+          "documentRefs": ["referenced document names"],
+          "details": "step-by-step instructions",
+          "estimatedTime": "how long this takes"
+        }}
+      ]
     }}
   ],
-  "criticalContacts": [{{"name": "...", "role": "...", "phone": "...", "email": "..."}}],
-  "documentChecklist": ["all critical documents needed"],
-  "institutionList": [{{"name": "...", "type": "bank|insurance|government|other", "contactInfo": "..."}}],
-  "legalSteps": ["required legal actions"],
-  "recommendations": ["additional suggestions"]
+  "criticalContacts": [
+    {{
+      "name": "contact name",
+      "role": "attorney|accountant|financial_advisor|government|bank|insurance|other",
+      "organization": "company/institution name",
+      "phone": "number if known",
+      "email": "email if known",
+      "priority": "critical|high|medium"
+    }}
+  ],
+  "documentChecklist": [
+    {{
+      "document": "document name",
+      "location": "physical or digital location",
+      "importance": "critical|important|helpful",
+      "status": "uploaded|missing|unknown"
+    }}
+  ],
+  "institutionList": [
+    {{
+      "name": "institution name",
+      "type": "bank|brokerage|insurance|government|employer|other",
+      "accountType": "checking|savings|investment|loan|insurance|other",
+      "contactInfo": "phone or website",
+      "notificationRequired": true/false,
+      "notificationDeadline": "time frame or null"
+    }}
+  ],
+  "legalSteps": [
+    {{
+      "step": "legal action required",
+      "deadline": "time constraint or null",
+      "professional": "type of professional needed",
+      "estimatedCost": "rough estimate or null"
+    }}
+  ],
+  "financialSummary": {{
+    "estimatedLiquidAssets": "amount available immediately",
+    "monthlyObligations": "recurring bills amount",
+    "insurancePayout": "expected life insurance amount if applicable"
+  }},
+  "recommendations": ["actionable improvements to make this plan more complete"],
+  "warnings": ["critical gaps or risks that could complicate the process"]
 }}"""
 
-    def extract_json(text):
-        text = text.strip()
-        if "```" in text:
-            parts = text.split("```")
-            text = parts[1] if len(parts) >= 2 else parts[0]
-        if text.startswith("json"):
-            text = text[4:]
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= 0:
-            text = text[start:end+1]
-        import re
-        text = re.sub(r',\s*}', '}', text)
-        text = re.sub(r',\s*]', ']', text)
-        return text
+    text = call_llm(
+        [{"role": "user", "content": prompt}],
+        system=PLAN_SYSTEM_PROMPT,
+        max_tokens=8192,
+        temperature=0.4,
+        json_mode=True,
+    )
 
     try:
-        text = call_llm([{"role": "user", "content": prompt}], system=PLAN_PROMPT, max_tokens=8192, temperature=0.4, json_mode=True)
         plan_data = json.loads(extract_json(text))
-    except Exception as e:
-        raw = text[:500] if 'text' in locals() else "No output from LLM"
-        return {"error": f"Failed to parse plan: {str(e)[:200]}. Raw: {raw}"}
+    except (json.JSONDecodeError, TypeError) as e:
+        raw = text[:500] if text else "No LLM output"
+        return {"error": f"Failed to parse plan: {str(e)[:200]}. Raw preview: {raw}"}
 
     plan_id = str(uuid.uuid4())
     plan_data["planId"] = plan_id
     plan_data["userId"] = user_id
     plan_data["generatedAt"] = datetime.now(timezone.utc).isoformat()
     plan_data["status"] = "complete"
+    plan_data["provider"] = os.environ.get("LLM_PROVIDER", "bedrock")
 
     PLANS_TABLE.put_item(Item=plan_data)
     return plan_data
+
 
 def lambda_handler(event, context):
     http = event.get("httpMethod", "GET")
@@ -172,9 +198,15 @@ def lambda_handler(event, context):
 
     return respond(404, {"error": "Not found"})
 
+
 def respond(status, body):
     return {
         "statusCode": status,
-        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        },
         "body": json.dumps(body, default=str),
     }

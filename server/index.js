@@ -49,6 +49,12 @@ const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID || '';
 const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN || '';
 const SES_FROM_ADDRESS = process.env.SES_FROM_ADDRESS || process.env.SMTP_FROM || '';
 
+// AI Provider settings
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'bedrock';
+const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'meta.llama3-70b-instruct-v1:0';
+const HF_MODEL_ID = process.env.HF_MODEL_ID || 'meta-llama/Llama-3.1-8B-Instruct';
+const HF_API_KEY_SECRET = process.env.HF_API_KEY_SECRET || process.env.HF_TOKEN || '';
+
 let awsSdkCache = null;
 
 async function getAwsSdk() {
@@ -193,7 +199,7 @@ async function refreshUserAnalysis(userId, userEmail = '') {
   const existingTwin = queryOne('SELECT * FROM financial_twins WHERE userId = ? ORDER BY generatedAt DESC', [userId]);
 
   const docSummary = docs.map((doc) => `${doc.category}: ${doc.fileName}`).join(' | ') || 'No documents uploaded yet.';
-  const aiSummary = await callGemini(
+  const aiSummary = await callLLM(
     `Analyze the current financial profile from these documents and return a brief practical summary plus 3 next steps. Documents: ${docSummary}`,
     'You are a financial continuity analyst. Provide a concise analysis and concrete next steps.',
     800,
@@ -287,7 +293,110 @@ function auth(req, res, next) {
 }
 
 // ─── AI Helper ─────────────────────────────────────────────
-async function callGemini(prompt, system = '', maxTokens = 1000, temperature = 0.7) {
+async function callLLM(prompt, system = '', maxTokens = 1000, temperature = 0.7) {
+  try {
+    if (LLM_PROVIDER === 'huggingface' || (!GEMINI_API_KEY && LLM_PROVIDER !== 'bedrock')) {
+      return await callHuggingFace(prompt, system, maxTokens, temperature);
+    } else if (LLM_PROVIDER === 'bedrock') {
+      return await callBedrock(prompt, system, maxTokens, temperature);
+    } else {
+      return await callGeminiAPI(prompt, system, maxTokens, temperature);
+    }
+  } catch (err) {
+    console.error(`AI call failed with ${LLM_PROVIDER}:`, err);
+    return fallbackResponse(prompt);
+  }
+}
+
+async function callBedrock(prompt, system, maxTokens, temperature) {
+  let BedrockRuntimeClient, InvokeModelCommand;
+  try {
+    const bedrockMod = await import('@aws-sdk/client-bedrock-runtime');
+    BedrockRuntimeClient = bedrockMod.BedrockRuntimeClient;
+    InvokeModelCommand = bedrockMod.InvokeModelCommand;
+  } catch (e) {
+    console.error("Please install @aws-sdk/client-bedrock-runtime to use AWS Bedrock.");
+    return fallbackResponse(prompt);
+  }
+  
+  const client = new BedrockRuntimeClient({ region: AWS_REGION });
+  const messages = [];
+  if (system) {
+    messages.push({ role: 'user', content: `[SYSTEM_PROMPT: ${system}]\n\n${prompt}` });
+  } else {
+    messages.push({ role: 'user', content: prompt });
+  }
+
+  // Handle meta.llama3 or mistral formatting depending on the model id
+  let body;
+  if (BEDROCK_MODEL_ID.includes('llama3')) {
+    const formattedPrompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n${system || 'You are a helpful assistant.'}<|eot_id|><|start_header_id|>user<|end_header_id|>\n${prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n`;
+    body = {
+      prompt: formattedPrompt,
+      max_gen_len: maxTokens,
+      temperature: temperature,
+    };
+  } else if (BEDROCK_MODEL_ID.includes('mistral')) {
+    body = {
+      prompt: `<s>[INST] ${system ? system + '\\n\\n' : ''}${prompt} [/INST]`,
+      max_tokens: maxTokens,
+      temperature: temperature,
+    };
+  } else {
+    // Other models might have different formats (e.g. anthropic claude)
+    body = { prompt, max_tokens: maxTokens, temperature };
+  }
+
+  const command = new InvokeModelCommand({
+    contentType: 'application/json',
+    accept: 'application/json',
+    modelId: BEDROCK_MODEL_ID,
+    body: JSON.stringify(body),
+  });
+
+  const response = await client.send(command);
+  const responseData = JSON.parse(new TextDecoder().decode(response.body));
+  if (BEDROCK_MODEL_ID.includes('llama3')) {
+    return responseData.generation || fallbackResponse(prompt);
+  } else if (BEDROCK_MODEL_ID.includes('mistral')) {
+    return responseData.outputs?.[0]?.text || fallbackResponse(prompt);
+  }
+  return JSON.stringify(responseData);
+}
+
+async function callHuggingFace(prompt, system, maxTokens, temperature) {
+  if (!HF_API_KEY_SECRET) return fallbackResponse(prompt);
+  let hfToken = HF_API_KEY_SECRET;
+  
+  // Try resolving ARN via aws-sdk in reality, but this is a demo environment
+  // and we might be passing the actual token via HF_TOKEN in Spaces.
+  
+  const formattedPrompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n${system || 'You are a helpful assistant.'}<|eot_id|><|start_header_id|>user<|end_header_id|>\n${prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n`;
+  
+  const resp = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL_ID}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${hfToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      inputs: formattedPrompt,
+      parameters: {
+        max_new_tokens: maxTokens,
+        temperature: temperature,
+        return_full_text: false
+      }
+    })
+  });
+  const data = await resp.json();
+  if (Array.isArray(data) && data[0]?.generated_text) {
+    return data[0].generated_text.trim();
+  }
+  console.error("HF Inference error:", data);
+  return fallbackResponse(prompt);
+}
+
+async function callGeminiAPI(prompt, system = '', maxTokens = 1000, temperature = 0.7) {
   if (!GEMINI_API_KEY) {
     return fallbackResponse(prompt);
   }
@@ -521,7 +630,7 @@ app.post('/api/ai/chat', auth, async (req, res) => {
   }
   const systemPrompt = 'You are GriefCart AI. Answer grounded, concise finance and continuity questions using the user context.';
   const prompt = `User Context:\n${contextStr}\n\nConversation history (last 5):\n${JSON.stringify((history || []).slice(-5))}\n\nUser: ${message}\n\nProvide a helpful response.`;
-  const answer = await callGemini(prompt, systemPrompt, 900, 0.7);
+  const answer = await callLLM(prompt, systemPrompt, 900, 0.7);
   run('INSERT INTO chat_history (userId, role, content) VALUES (?, ?, ?)', [req.userId, 'user', message]);
   run('INSERT INTO chat_history (userId, role, content) VALUES (?, ?, ?)', [req.userId, 'assistant', answer]);
   res.json({ message: answer, timestamp: new Date().toISOString(), hasTwin: !!twin });
@@ -532,13 +641,13 @@ app.post('/api/ai/twin', auth, async (req, res) => {
   if (!question) return res.status(400).json({ error: 'Question required' });
   const twin = queryOne('SELECT * FROM financial_twins WHERE userId = ? ORDER BY generatedAt DESC', [req.userId]);
   const context = twin ? JSON.stringify({ profile: JSON.parse(twin.profile), assets: JSON.parse(twin.assets), liabilities: JSON.parse(twin.liabilities), insurance: JSON.parse(twin.insurance), risks: JSON.parse(twin.risks) }, null, 2) : 'No financial twin data available yet.';
-  const answer = await callGemini(`User Question: ${question}\n\nFinancial Twin Data:\n${context}\n\nAnswer using the data and be specific.`, 'You are a financial analysis assistant.', 800, 0.7);
+  const answer = await callLLM(`User Question: ${question}\n\nFinancial Twin Data:\n${context}\n\nAnswer using the data and be specific.`, 'You are a financial analysis assistant.', 800, 0.7);
   res.json({ answer, twinGeneratedAt: twin?.generatedAt || new Date().toISOString() });
 });
 
 app.post('/api/ai/plan', auth, async (req, res) => {
   const payload = req.body || {};
-  const summary = await callGemini(`Create a concise continuity-plan summary for the user based on this payload:\n${JSON.stringify(payload, null, 2)}`, 'You are a continuity planning assistant.', 600, 0.7);
+  const summary = await callLLM(`Create a concise continuity-plan summary for the user based on this payload:\n${JSON.stringify(payload, null, 2)}`, 'You are a continuity planning assistant.', 600, 0.7);
   res.json({ summary });
 });
 
@@ -754,7 +863,7 @@ app.post('/api/twin/query', auth, async (req, res) => {
   }, null, 2) : 'No financial twin data available yet.';
   
   const prompt = `User Question: ${question}\n\nFinancial Twin Data:\n${context}\n\nAnswer the question based on the financial twin data. Be specific and reference actual values when available.`;
-  const answer = await callGemini(prompt, "You are a financial analysis AI assistant. Answer questions about the user's financial data.", 800, 0.7);
+  const answer = await callLLM(prompt, "You are a financial analysis AI assistant. Answer questions about the user's financial data.", 800, 0.7);
   
   res.json({ answer, twinGeneratedAt: twin?.generatedAt || new Date().toISOString() });
 });
@@ -764,7 +873,7 @@ app.post('/api/twin/refresh', auth, async (req, res) => {
   const docs = queryAll('SELECT * FROM documents WHERE userId = ? ORDER BY uploadedAt DESC LIMIT 6', [req.userId]);
   const count = docs.length;
   const docSummary = docs.map(d => `${d.category}: ${d.fileName}`).join(' | ');
-  const aiSummary = await callGemini(`Create a short summary of the user's financial profile based on these documents: ${docSummary || 'No documents uploaded yet.'}`, 'You are a financial twin analyst.', 600, 0.4);
+  const aiSummary = await callLLM(`Create a short summary of the user's financial profile based on these documents: ${docSummary || 'No documents uploaded yet.'}`, 'You are a financial twin analyst.', 600, 0.4);
 
   const profile = {
     email: req.user.email || '',

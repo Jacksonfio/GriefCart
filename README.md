@@ -205,7 +205,43 @@ GriefCart is powered by AWS cloud services.
 
 ### AI
 
-* Amazon Bedrock (or Gemini fallback)
+* Amazon Bedrock (Meta Llama 3 70B & Mistral)
+* HuggingFace Inference API (Llama 3 8B fallback)
+* Google Gemini (Legacy fallback)
+
+---
+
+# 🤖 AI Provider Setup
+
+GriefCart uses a **multi-provider AI architecture** with automatic fallback:
+
+`Bedrock (Llama 3 / Mistral) → HuggingFace Inference API → Gemini (legacy)`
+
+### Option 1: AWS Bedrock — Open-Source Models (Recommended)
+Uses Meta Llama 3 and Mistral models hosted natively on AWS — no external API keys needed.
+
+1. Enable models in the [AWS Bedrock console](https://console.aws.amazon.com/bedrock/home#/modelaccess):
+   - ✅ `meta.llama3-70b-instruct-v1:0` (recommended)
+   - ✅ `meta.llama3-8b-instruct-v1:0` (faster)
+   - ✅ `mistral.mistral-7b-instruct-v0:2`
+2. Deploy with: `sam deploy` (Bedrock is the default)
+
+See instructions: `python setup_hf_secret.py --bedrock-info`
+
+### Option 2: HuggingFace Inference API
+Direct calls to HuggingFace's hosted open-source models for use in deployment environments without AWS Bedrock access (like HuggingFace Spaces).
+
+```bash
+python setup_hf_secret.py --token hf_yourTokenHere
+sam deploy --parameter-overrides LLMProvider=huggingface HuggingFaceApiKeySecretArn=arn:aws:...
+```
+
+### Option 3: Gemini (Legacy)
+The original Gemini integration — still works as a final fallback.
+
+```bash
+sam deploy --parameter-overrides LLMProvider=gemini
+```
 
 ---
 
